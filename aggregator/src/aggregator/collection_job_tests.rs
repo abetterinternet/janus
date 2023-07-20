@@ -23,9 +23,9 @@ use janus_core::{
     time::{Clock, IntervalExt, MockClock},
 };
 use janus_messages::{
-    query_type::{FixedSize, QueryType as QueryTypeTrait, TimeInterval},
+    query_type::{FixedSize, QueryType as QueryTypeTrait},
     AggregateShareAad, AggregationJobRound, BatchId, BatchSelector, Collection, CollectionJobId,
-    CollectionReq, Duration, FixedSizeQuery, Interval, Query, ReportIdChecksum, Role, Time,
+    CollectionReq, Duration, FixedSizeQuery, Interval, Query, ReportIdChecksum, Role,
 };
 use prio::codec::{Decode, Encode};
 use rand::random;
@@ -66,7 +66,7 @@ impl CollectionJobTestCase {
         test_conn
             .with_request_header(
                 KnownHeaderName::ContentType,
-                CollectionReq::<TimeInterval>::MEDIA_TYPE,
+                CollectionReq::<FixedSize>::MEDIA_TYPE,
             )
             .with_request_body(request.get_encoded())
             .run_async(&self.handler)
@@ -430,128 +430,6 @@ async fn collection_job_success_fixed_size() {
             "taskid": format!("{}", test_case.task.id()),
         }),
     );
-}
-
-#[tokio::test]
-async fn collection_job_put_idempotence_time_interval() {
-    let test_case = setup_collection_job_test_case(Role::Leader, QueryType::TimeInterval).await;
-
-    let collection_job_id = random();
-    let request = CollectionReq::new(
-        Query::new_time_interval(
-            Interval::new(
-                Time::from_seconds_since_epoch(0),
-                *test_case.task.time_precision(),
-            )
-            .unwrap(),
-        ),
-        dummy_vdaf::AggregationParam::default().get_encoded(),
-    );
-
-    for _ in 0..2 {
-        let response = test_case
-            .put_collection_job(&collection_job_id, &request)
-            .await;
-        assert_eq!(response.status(), Some(Status::Created));
-    }
-
-    // There should only be a single collection job despite two successful PUTs
-    test_case
-        .datastore
-        .run_tx(|tx| {
-            let task_id = *test_case.task.id();
-            let vdaf = dummy_vdaf::Vdaf::new();
-            Box::pin(async move {
-                let collection_jobs = tx
-                    .get_collection_jobs_for_task::<0, TimeInterval, dummy_vdaf::Vdaf>(
-                        &vdaf, &task_id,
-                    )
-                    .await
-                    .unwrap();
-                assert_eq!(collection_jobs.len(), 1);
-                assert_eq!(collection_jobs[0].id(), &collection_job_id);
-
-                Ok(())
-            })
-        })
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn collection_job_put_idempotence_time_interval_mutate_time_interval() {
-    let test_case = setup_collection_job_test_case(Role::Leader, QueryType::TimeInterval).await;
-
-    let collection_job_id = random();
-    let request = CollectionReq::new(
-        Query::new_time_interval(
-            Interval::new(
-                Time::from_seconds_since_epoch(0),
-                *test_case.task.time_precision(),
-            )
-            .unwrap(),
-        ),
-        dummy_vdaf::AggregationParam::default().get_encoded(),
-    );
-
-    let response = test_case
-        .put_collection_job(&collection_job_id, &request)
-        .await;
-    assert_eq!(response.status(), Some(Status::Created));
-
-    let mutated_request = CollectionReq::new(
-        Query::new_time_interval(
-            Interval::new(
-                Time::from_seconds_since_epoch(test_case.task.time_precision().as_seconds()),
-                *test_case.task.time_precision(),
-            )
-            .unwrap(),
-        ),
-        dummy_vdaf::AggregationParam::default().get_encoded(),
-    );
-
-    let response = test_case
-        .put_collection_job(&collection_job_id, &mutated_request)
-        .await;
-    assert_eq!(response.status(), Some(Status::Conflict));
-}
-
-#[tokio::test]
-async fn collection_job_put_idempotence_time_interval_mutate_aggregation_param() {
-    let test_case = setup_collection_job_test_case(Role::Leader, QueryType::TimeInterval).await;
-
-    let collection_job_id = random();
-    let request = CollectionReq::new(
-        Query::new_time_interval(
-            Interval::new(
-                Time::from_seconds_since_epoch(0),
-                *test_case.task.time_precision(),
-            )
-            .unwrap(),
-        ),
-        dummy_vdaf::AggregationParam(0).get_encoded(),
-    );
-
-    let response = test_case
-        .put_collection_job(&collection_job_id, &request)
-        .await;
-    assert_eq!(response.status(), Some(Status::Created));
-
-    let mutated_request = CollectionReq::new(
-        Query::new_time_interval(
-            Interval::new(
-                Time::from_seconds_since_epoch(0),
-                *test_case.task.time_precision(),
-            )
-            .unwrap(),
-        ),
-        dummy_vdaf::AggregationParam(1).get_encoded(),
-    );
-
-    let response = test_case
-        .put_collection_job(&collection_job_id, &mutated_request)
-        .await;
-    assert_eq!(response.status(), Some(Status::Conflict));
 }
 
 #[tokio::test]

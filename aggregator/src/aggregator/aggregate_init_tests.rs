@@ -15,8 +15,8 @@ use janus_core::{
     time::{Clock, MockClock, TimeExt as _},
 };
 use janus_messages::{
-    query_type::TimeInterval, AggregationJobId, AggregationJobInitializeReq, PartialBatchSelector,
-    ReportMetadata, ReportShare, Role,
+    query_type::FixedSize, AggregationJobId, AggregationJobInitializeReq, BatchId,
+    PartialBatchSelector, ReportMetadata, ReportShare, Role,
 };
 use prio::codec::Encode;
 use rand::random;
@@ -90,7 +90,8 @@ pub(super) struct AggregationJobInitTestCase {
     pub(super) report_share_generator: ReportShareGenerator,
     pub(super) report_shares: Vec<ReportShare>,
     pub(super) aggregation_job_id: AggregationJobId,
-    aggregation_job_init_req: AggregationJobInitializeReq<TimeInterval>,
+    aggregation_job_init_req: AggregationJobInitializeReq<FixedSize>,
+    pub(super) batch_id: BatchId,
     pub(super) aggregation_param: dummy_vdaf::AggregationParam,
     pub(super) handler: Box<dyn Handler>,
     pub(super) datastore: Arc<Datastore<MockClock>>,
@@ -115,7 +116,12 @@ pub(super) async fn setup_aggregate_init_test() -> AggregationJobInitTestCase {
 async fn setup_aggregate_init_test_without_sending_request() -> AggregationJobInitTestCase {
     install_test_trace_subscriber();
 
-    let task = TaskBuilder::new(QueryType::TimeInterval, VdafInstance::Fake, Role::Helper).build();
+    let task = TaskBuilder::new(
+        QueryType::FixedSize { max_batch_size: 10 },
+        VdafInstance::Fake,
+        Role::Helper,
+    )
+    .build();
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let datastore = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
@@ -141,9 +147,10 @@ async fn setup_aggregate_init_test_without_sending_request() -> AggregationJobIn
     ]);
 
     let aggregation_job_id = random();
+    let batch_id = random();
     let aggregation_job_init_req = AggregationJobInitializeReq::new(
         aggregation_param.get_encoded(),
-        PartialBatchSelector::new_time_interval(),
+        PartialBatchSelector::new_fixed_size(batch_id),
         report_shares.clone(),
     );
 
@@ -154,6 +161,7 @@ async fn setup_aggregate_init_test_without_sending_request() -> AggregationJobIn
         report_share_generator,
         aggregation_job_id,
         aggregation_job_init_req,
+        batch_id,
         aggregation_param,
         handler: Box::new(handler),
         datastore,
@@ -164,7 +172,7 @@ async fn setup_aggregate_init_test_without_sending_request() -> AggregationJobIn
 pub(crate) async fn put_aggregation_job(
     task: &Task,
     aggregation_job_id: &AggregationJobId,
-    aggregation_job: &AggregationJobInitializeReq<TimeInterval>,
+    aggregation_job: &AggregationJobInitializeReq<FixedSize>,
     handler: &impl Handler,
 ) -> TestConn {
     put(task.aggregation_job_uri(aggregation_job_id).unwrap().path())
@@ -174,7 +182,7 @@ pub(crate) async fn put_aggregation_job(
         )
         .with_request_header(
             KnownHeaderName::ContentType,
-            AggregationJobInitializeReq::<TimeInterval>::MEDIA_TYPE,
+            AggregationJobInitializeReq::<FixedSize>::MEDIA_TYPE,
         )
         .with_request_body(aggregation_job.get_encoded())
         .run_async(handler)
@@ -201,7 +209,7 @@ async fn aggregation_job_init_authorization_dap_auth_token() {
     .with_request_header(auth_header, auth_value)
     .with_request_header(
         KnownHeaderName::ContentType,
-        AggregationJobInitializeReq::<TimeInterval>::MEDIA_TYPE,
+        AggregationJobInitializeReq::<FixedSize>::MEDIA_TYPE,
     )
     .with_request_body(test_case.aggregation_job_init_req.get_encoded())
     .run_async(&test_case.handler)
@@ -236,7 +244,7 @@ async fn aggregation_job_init_malformed_authorization_header(#[case] header_valu
     )
     .with_request_header(
         KnownHeaderName::ContentType,
-        AggregationJobInitializeReq::<TimeInterval>::MEDIA_TYPE,
+        AggregationJobInitializeReq::<FixedSize>::MEDIA_TYPE,
     )
     .with_request_body(test_case.aggregation_job_init_req.get_encoded())
     .run_async(&test_case.handler)
@@ -252,7 +260,7 @@ async fn aggregation_job_mutation_aggregation_job() {
     // Put the aggregation job again, but with a different aggregation parameter.
     let mutated_aggregation_job_init_req = AggregationJobInitializeReq::new(
         dummy_vdaf::AggregationParam(1).get_encoded(),
-        PartialBatchSelector::new_time_interval(),
+        PartialBatchSelector::new_fixed_size(test_case.batch_id),
         test_case.report_shares,
     );
 
@@ -292,7 +300,7 @@ async fn aggregation_job_mutation_report_shares() {
     ] {
         let mutated_aggregation_job_init_req = AggregationJobInitializeReq::new(
             test_case.aggregation_param.get_encoded(),
-            PartialBatchSelector::new_time_interval(),
+            PartialBatchSelector::new_fixed_size(test_case.batch_id),
             mutated_report_shares,
         );
         let response = put_aggregation_job(
@@ -328,7 +336,7 @@ async fn aggregation_job_mutation_report_aggregations() {
 
     let mutated_aggregation_job_init_req = AggregationJobInitializeReq::new(
         test_case.aggregation_param.get_encoded(),
-        PartialBatchSelector::new_time_interval(),
+        PartialBatchSelector::new_fixed_size(test_case.batch_id),
         mutated_report_shares,
     );
     let response = put_aggregation_job(

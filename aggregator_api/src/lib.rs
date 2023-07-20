@@ -621,8 +621,8 @@ mod tests {
         time::MockClock,
     };
     use janus_messages::{
-        query_type::TimeInterval, AggregationJobRound, Duration, HpkeAeadId, HpkeConfig,
-        HpkeConfigId, HpkeKdfId, HpkeKemId, HpkePublicKey, Interval, Role, TaskId, Time,
+        query_type::FixedSize, AggregationJobRound, Duration, HpkeAeadId, HpkeConfig, HpkeConfigId,
+        HpkeKdfId, HpkeKemId, HpkePublicKey, Interval, Role, TaskId, Time,
     };
     use rand::{distributions::Standard, random, thread_rng, Rng};
     use serde_test::{assert_ser_tokens, assert_tokens, Token};
@@ -658,8 +658,12 @@ mod tests {
             .run_tx(|tx| {
                 Box::pin(async move {
                     let tasks: Vec<_> = iter::repeat_with(|| {
-                        TaskBuilder::new(QueryType::TimeInterval, VdafInstance::Fake, Role::Leader)
-                            .build()
+                        TaskBuilder::new(
+                            QueryType::FixedSize { max_batch_size: 10 },
+                            VdafInstance::Fake,
+                            Role::Leader,
+                        )
+                        .build()
                     })
                     .take(10)
                     .collect();
@@ -765,7 +769,7 @@ mod tests {
 
         let req = PostTaskReq {
             peer_aggregator_endpoint: "http://aggregator.endpoint".try_into().unwrap(),
-            query_type: QueryType::TimeInterval,
+            query_type: QueryType::FixedSize { max_batch_size: 10 },
             vdaf: VdafInstance::Prio3Count,
             role: Role::Collector,
             vdaf_verify_key: URL_SAFE_NO_PAD.encode(&vdaf_verify_key),
@@ -809,7 +813,7 @@ mod tests {
 
         let req = PostTaskReq {
             peer_aggregator_endpoint: "http://aggregator.endpoint".try_into().unwrap(),
-            query_type: QueryType::TimeInterval,
+            query_type: QueryType::FixedSize { max_batch_size: 10 },
             vdaf: VdafInstance::Prio3Count,
             role: Role::Helper,
             vdaf_verify_key: URL_SAFE_NO_PAD.encode(&vdaf_verify_key),
@@ -851,7 +855,9 @@ mod tests {
         // Verify: posting a task creates a new task which matches the request.
         let req = PostTaskReq {
             peer_aggregator_endpoint: "http://aggregator.endpoint".try_into().unwrap(),
-            query_type: QueryType::TimeInterval,
+            query_type: QueryType::FixedSize {
+                max_batch_size: 224,
+            },
             vdaf: VdafInstance::Prio3Count,
             role: Role::Helper,
             vdaf_verify_key: URL_SAFE_NO_PAD.encode(&vdaf_verify_key),
@@ -931,7 +937,7 @@ mod tests {
         // Verify: posting a task with role = helper and an aggregator auth token fails
         let req = PostTaskReq {
             peer_aggregator_endpoint: "http://aggregator.endpoint".try_into().unwrap(),
-            query_type: QueryType::TimeInterval,
+            query_type: QueryType::FixedSize { max_batch_size: 10 },
             vdaf: VdafInstance::Prio3Count,
             role: Role::Helper,
             vdaf_verify_key: URL_SAFE_NO_PAD.encode(&vdaf_verify_key),
@@ -977,7 +983,9 @@ mod tests {
         // Verify: posting a task creates a new task which matches the request.
         let req = PostTaskReq {
             peer_aggregator_endpoint: "http://aggregator.endpoint".try_into().unwrap(),
-            query_type: QueryType::TimeInterval,
+            query_type: QueryType::FixedSize {
+                max_batch_size: 224,
+            },
             vdaf: VdafInstance::Prio3Count,
             role: Role::Leader,
             vdaf_verify_key: URL_SAFE_NO_PAD.encode(&vdaf_verify_key),
@@ -1067,7 +1075,7 @@ mod tests {
         // Verify: posting a task with role = Leader and no aggregator auth token fails
         let req = PostTaskReq {
             peer_aggregator_endpoint: "http://aggregator.endpoint".try_into().unwrap(),
-            query_type: QueryType::TimeInterval,
+            query_type: QueryType::FixedSize { max_batch_size: 10 },
             vdaf: VdafInstance::Prio3Count,
             role: Role::Leader,
             vdaf_verify_key: URL_SAFE_NO_PAD.encode(&vdaf_verify_key),
@@ -1106,10 +1114,14 @@ mod tests {
         // Setup: write a task to the datastore.
         let (handler, _ephemeral_datastore, ds) = setup_api_test().await;
 
-        let task = TaskBuilder::new(QueryType::TimeInterval, VdafInstance::Fake, Role::Leader)
-            .with_aggregator_auth_tokens(Vec::from([random()]))
-            .with_collector_auth_tokens(Vec::from([random()]))
-            .build();
+        let task = TaskBuilder::new(
+            QueryType::FixedSize { max_batch_size: 10 },
+            VdafInstance::Fake,
+            Role::Leader,
+        )
+        .with_aggregator_auth_tokens(Vec::from([random()]))
+        .with_collector_auth_tokens(Vec::from([random()]))
+        .build();
 
         ds.run_tx(|tx| {
             let task = task.clone();
@@ -1176,9 +1188,12 @@ mod tests {
         let task_id = ds
             .run_tx(|tx| {
                 Box::pin(async move {
-                    let task =
-                        TaskBuilder::new(QueryType::TimeInterval, VdafInstance::Fake, Role::Leader)
-                            .build();
+                    let task = TaskBuilder::new(
+                        QueryType::FixedSize { max_batch_size: 10 },
+                        VdafInstance::Fake,
+                        Role::Leader,
+                    )
+                    .build();
 
                     tx.put_task(&task).await?;
 
@@ -1260,9 +1275,12 @@ mod tests {
         let task_id = ds
             .run_tx(|tx| {
                 Box::pin(async move {
-                    let task =
-                        TaskBuilder::new(QueryType::TimeInterval, VdafInstance::Fake, Role::Leader)
-                            .build();
+                    let task = TaskBuilder::new(
+                        QueryType::FixedSize { max_batch_size: 10 },
+                        VdafInstance::Fake,
+                        Role::Leader,
+                    )
+                    .build();
                     let task_id = *task.id();
                     tx.put_task(&task).await?;
 
@@ -1277,21 +1295,16 @@ mod tests {
                     .await?;
 
                     let aggregation_job_id = random();
-                    tx.put_aggregation_job(
-                        &AggregationJob::<0, TimeInterval, dummy_vdaf::Vdaf>::new(
-                            task_id,
-                            aggregation_job_id,
-                            AggregationParam(0),
-                            (),
-                            Interval::new(
-                                Time::from_seconds_since_epoch(0),
-                                Duration::from_seconds(1),
-                            )
+                    tx.put_aggregation_job(&AggregationJob::<0, FixedSize, dummy_vdaf::Vdaf>::new(
+                        task_id,
+                        aggregation_job_id,
+                        AggregationParam(0),
+                        random(),
+                        Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                             .unwrap(),
-                            AggregationJobState::InProgress,
-                            AggregationJobRound::from(0),
-                        ),
-                    )
+                        AggregationJobState::InProgress,
+                        AggregationJobRound::from(0),
+                    ))
                     .await?;
 
                     try_join_all(

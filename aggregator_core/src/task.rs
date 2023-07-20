@@ -36,9 +36,6 @@ pub enum Error {
 /// Identifiers for query types used by a task, along with query-type specific configuration.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum QueryType {
-    /// Time-interval: used to support a collection style based on fixed time intervals.
-    TimeInterval,
-
     /// Fixed-size: used to support collection of batches as quickly as possible, without aligning
     /// to a fixed batch window.
     FixedSize {
@@ -193,10 +190,9 @@ impl Task {
         if self.hpke_keys.is_empty() {
             return Err(Error::InvalidParameter("hpke_keys"));
         }
-        if let QueryType::FixedSize { max_batch_size } = self.query_type() {
-            if *max_batch_size < self.min_batch_size() {
-                return Err(Error::InvalidParameter("max_batch_size"));
-            }
+        let QueryType::FixedSize { max_batch_size } = self.query_type();
+        if *max_batch_size < self.min_batch_size() {
+            return Err(Error::InvalidParameter("max_batch_size"));
         }
         Ok(())
     }
@@ -295,10 +291,6 @@ impl Task {
     /// <https://www.ietf.org/archive/id/draft-ietf-ppm-dap-02.html#section-4.5.6>
     pub fn validate_batch_size(&self, batch_size: u64) -> bool {
         match self.query_type {
-            QueryType::TimeInterval => {
-                // https://www.ietf.org/archive/id/draft-ietf-ppm-dap-02.html#section-4.5.6.1.2
-                batch_size >= self.min_batch_size()
-            }
             QueryType::FixedSize { max_batch_size } => {
                 // https://www.ietf.org/archive/id/draft-ietf-ppm-dap-02.html#section-4.5.6.2.2
                 batch_size >= self.min_batch_size() && batch_size <= max_batch_size
@@ -784,7 +776,7 @@ mod tests {
     };
     use janus_core::{
         hpke::{test_util::generate_test_hpke_config_and_private_key, HpkeKeypair, HpkePrivateKey},
-        task::{AuthenticationToken, DapAuthToken, PRIO3_VERIFY_KEY_LENGTH},
+        task::{AuthenticationToken, PRIO3_VERIFY_KEY_LENGTH},
         test_util::roundtrip_encoding,
         time::DurationExt,
     };
@@ -800,7 +792,7 @@ mod tests {
     fn task_serialization() {
         roundtrip_encoding(
             TaskBuilder::new(
-                QueryType::TimeInterval,
+                QueryType::FixedSize { max_batch_size: 10 },
                 VdafInstance::Prio3Count,
                 Role::Leader,
             )
@@ -822,7 +814,7 @@ mod tests {
                 "http://leader_endpoint".parse().unwrap(),
                 "http://helper_endpoint".parse().unwrap(),
             ]),
-            QueryType::TimeInterval,
+            QueryType::FixedSize { max_batch_size: 10 },
             VdafInstance::Prio3Count,
             Role::Leader,
             Vec::from([SecretBytes::new([0; PRIO3_VERIFY_KEY_LENGTH].into())]),
@@ -846,7 +838,7 @@ mod tests {
                 "http://leader_endpoint".parse().unwrap(),
                 "http://helper_endpoint".parse().unwrap(),
             ]),
-            QueryType::TimeInterval,
+            QueryType::FixedSize { max_batch_size: 10 },
             VdafInstance::Prio3Count,
             Role::Leader,
             Vec::from([SecretBytes::new([0; PRIO3_VERIFY_KEY_LENGTH].into())]),
@@ -870,7 +862,7 @@ mod tests {
                 "http://leader_endpoint".parse().unwrap(),
                 "http://helper_endpoint".parse().unwrap(),
             ]),
-            QueryType::TimeInterval,
+            QueryType::FixedSize { max_batch_size: 10 },
             VdafInstance::Prio3Count,
             Role::Helper,
             Vec::from([SecretBytes::new([0; PRIO3_VERIFY_KEY_LENGTH].into())]),
@@ -894,7 +886,7 @@ mod tests {
                 "http://leader_endpoint".parse().unwrap(),
                 "http://helper_endpoint".parse().unwrap(),
             ]),
-            QueryType::TimeInterval,
+            QueryType::FixedSize { max_batch_size: 10 },
             VdafInstance::Prio3Count,
             Role::Helper,
             Vec::from([SecretBytes::new([0; PRIO3_VERIFY_KEY_LENGTH].into())]),
@@ -920,7 +912,7 @@ mod tests {
                 "http://leader_endpoint/foo/bar".parse().unwrap(),
                 "http://helper_endpoint".parse().unwrap(),
             ]),
-            QueryType::TimeInterval,
+            QueryType::FixedSize { max_batch_size: 10 },
             VdafInstance::Prio3Count,
             Role::Leader,
             Vec::from([SecretBytes::new([0; PRIO3_VERIFY_KEY_LENGTH].into())]),
@@ -952,7 +944,7 @@ mod tests {
             (
                 "",
                 TaskBuilder::new(
-                    QueryType::TimeInterval,
+                    QueryType::FixedSize { max_batch_size: 10 },
                     VdafInstance::Prio3Count,
                     Role::Leader,
                 )
@@ -961,7 +953,7 @@ mod tests {
             (
                 "/prefix",
                 TaskBuilder::new(
-                    QueryType::TimeInterval,
+                    QueryType::FixedSize { max_batch_size: 10 },
                     VdafInstance::Prio3Count,
                     Role::Leader,
                 )
@@ -993,186 +985,6 @@ mod tests {
 
     #[test]
     fn task_serde() {
-        assert_tokens(
-            &Task::new(
-                TaskId::from([0; 32]),
-                Vec::from([
-                    "https://example.com/".parse().unwrap(),
-                    "https://example.net/".parse().unwrap(),
-                ]),
-                QueryType::TimeInterval,
-                VdafInstance::Prio3Count,
-                Role::Leader,
-                Vec::from([SecretBytes::new(b"1234567812345678".to_vec())]),
-                1,
-                None,
-                None,
-                10,
-                Duration::from_seconds(3600),
-                Duration::from_seconds(60),
-                HpkeConfig::new(
-                    HpkeConfigId::from(8),
-                    HpkeKemId::X25519HkdfSha256,
-                    HpkeKdfId::HkdfSha256,
-                    HpkeAeadId::Aes128Gcm,
-                    HpkePublicKey::from(b"collector hpke public key".to_vec()),
-                ),
-                Vec::from([AuthenticationToken::DapAuth(
-                    DapAuthToken::try_from(b"aggregator token".to_vec()).unwrap(),
-                )]),
-                Vec::from([AuthenticationToken::Bearer(b"collector token".to_vec())]),
-                [HpkeKeypair::new(
-                    HpkeConfig::new(
-                        HpkeConfigId::from(255),
-                        HpkeKemId::X25519HkdfSha256,
-                        HpkeKdfId::HkdfSha256,
-                        HpkeAeadId::Aes128Gcm,
-                        HpkePublicKey::from(b"aggregator hpke public key".to_vec()),
-                    ),
-                    HpkePrivateKey::new(b"aggregator hpke private key".to_vec()),
-                )],
-            )
-            .unwrap(),
-            &[
-                Token::Struct {
-                    name: "SerializedTask",
-                    len: 16,
-                },
-                Token::Str("task_id"),
-                Token::Some,
-                Token::Str("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
-                Token::Str("aggregator_endpoints"),
-                Token::Seq { len: Some(2) },
-                Token::Str("https://example.com/"),
-                Token::Str("https://example.net/"),
-                Token::SeqEnd,
-                Token::Str("query_type"),
-                Token::UnitVariant {
-                    name: "QueryType",
-                    variant: "TimeInterval",
-                },
-                Token::Str("vdaf"),
-                Token::UnitVariant {
-                    name: "VdafInstance",
-                    variant: "Prio3Count",
-                },
-                Token::Str("role"),
-                Token::UnitVariant {
-                    name: "Role",
-                    variant: "Leader",
-                },
-                Token::Str("vdaf_verify_keys"),
-                Token::Seq { len: Some(1) },
-                Token::Str("MTIzNDU2NzgxMjM0NTY3OA"),
-                Token::SeqEnd,
-                Token::Str("max_batch_query_count"),
-                Token::U64(1),
-                Token::Str("task_expiration"),
-                Token::None,
-                Token::Str("report_expiry_age"),
-                Token::None,
-                Token::Str("min_batch_size"),
-                Token::U64(10),
-                Token::Str("time_precision"),
-                Token::NewtypeStruct { name: "Duration" },
-                Token::U64(3600),
-                Token::Str("tolerable_clock_skew"),
-                Token::NewtypeStruct { name: "Duration" },
-                Token::U64(60),
-                Token::Str("collector_hpke_config"),
-                Token::Struct {
-                    name: "HpkeConfig",
-                    len: 5,
-                },
-                Token::Str("id"),
-                Token::NewtypeStruct {
-                    name: "HpkeConfigId",
-                },
-                Token::U8(8),
-                Token::Str("kem_id"),
-                Token::UnitVariant {
-                    name: "HpkeKemId",
-                    variant: "X25519HkdfSha256",
-                },
-                Token::Str("kdf_id"),
-                Token::UnitVariant {
-                    name: "HpkeKdfId",
-                    variant: "HkdfSha256",
-                },
-                Token::Str("aead_id"),
-                Token::UnitVariant {
-                    name: "HpkeAeadId",
-                    variant: "Aes128Gcm",
-                },
-                Token::Str("public_key"),
-                Token::Str("Y29sbGVjdG9yIGhwa2UgcHVibGljIGtleQ"),
-                Token::StructEnd,
-                Token::Str("aggregator_auth_tokens"),
-                Token::Seq { len: Some(1) },
-                Token::Struct {
-                    name: "AuthenticationToken",
-                    len: 2,
-                },
-                Token::Str("type"),
-                Token::Str("DapAuth"),
-                Token::Str("token"),
-                Token::Str("YWdncmVnYXRvciB0b2tlbg"),
-                Token::StructEnd,
-                Token::SeqEnd,
-                Token::Str("collector_auth_tokens"),
-                Token::Seq { len: Some(1) },
-                Token::Struct {
-                    name: "AuthenticationToken",
-                    len: 2,
-                },
-                Token::Str("type"),
-                Token::Str("Bearer"),
-                Token::Str("token"),
-                Token::Str("Y29sbGVjdG9yIHRva2Vu"),
-                Token::StructEnd,
-                Token::SeqEnd,
-                Token::Str("hpke_keys"),
-                Token::Seq { len: Some(1) },
-                Token::Struct {
-                    name: "HpkeKeypair",
-                    len: 2,
-                },
-                Token::Str("config"),
-                Token::Struct {
-                    name: "HpkeConfig",
-                    len: 5,
-                },
-                Token::Str("id"),
-                Token::NewtypeStruct {
-                    name: "HpkeConfigId",
-                },
-                Token::U8(255),
-                Token::Str("kem_id"),
-                Token::UnitVariant {
-                    name: "HpkeKemId",
-                    variant: "X25519HkdfSha256",
-                },
-                Token::Str("kdf_id"),
-                Token::UnitVariant {
-                    name: "HpkeKdfId",
-                    variant: "HkdfSha256",
-                },
-                Token::Str("aead_id"),
-                Token::UnitVariant {
-                    name: "HpkeAeadId",
-                    variant: "Aes128Gcm",
-                },
-                Token::Str("public_key"),
-                Token::Str("YWdncmVnYXRvciBocGtlIHB1YmxpYyBrZXk"),
-                Token::StructEnd,
-                Token::Str("private_key"),
-                Token::Str("YWdncmVnYXRvciBocGtlIHByaXZhdGUga2V5"),
-                Token::StructEnd,
-                Token::SeqEnd,
-                Token::StructEnd,
-            ],
-        );
-
         assert_tokens(
             &Task::new(
                 TaskId::from([255; 32]),

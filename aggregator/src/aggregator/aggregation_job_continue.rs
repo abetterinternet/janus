@@ -82,27 +82,6 @@ impl VdafOps {
                 break report_agg;
             };
 
-            // Make sure this report isn't in an interval that has already started collection.
-            let conflicting_aggregate_share_jobs = tx
-                .get_aggregate_share_jobs_including_time::<SEED_SIZE, A>(
-                    &vdaf,
-                    task.id(),
-                    report_aggregation.time(),
-                )
-                .await?;
-            if !conflicting_aggregate_share_jobs.is_empty() {
-                *report_aggregation = report_aggregation
-                    .clone()
-                    .with_state(ReportAggregationState::Failed(
-                        ReportShareError::BatchCollected,
-                    ))
-                    .with_last_prep_step(Some(PrepareStep::new(
-                        *prep_step.report_id(),
-                        PrepareStepResult::Failed(ReportShareError::BatchCollected),
-                    )));
-                continue;
-            }
-
             let prep_state = match report_aggregation.state() {
                 ReportAggregationState::Waiting(prep_state, _) => prep_state,
                 _ => {
@@ -406,7 +385,7 @@ mod tests {
         time::{IntervalExt, MockClock},
     };
     use janus_messages::{
-        query_type::TimeInterval, AggregationJobContinueReq, AggregationJobId, AggregationJobResp,
+        query_type::FixedSize, AggregationJobContinueReq, AggregationJobId, AggregationJobResp,
         AggregationJobRound, Interval, PrepareStep, PrepareStepResult, Role,
     };
     use prio::codec::Encode;
@@ -432,8 +411,12 @@ mod tests {
         install_test_trace_subscriber();
 
         let aggregation_job_id = random();
-        let task =
-            TaskBuilder::new(QueryType::TimeInterval, VdafInstance::Fake, Role::Helper).build();
+        let task = TaskBuilder::new(
+            QueryType::FixedSize { max_batch_size: 10 },
+            VdafInstance::Fake,
+            Role::Helper,
+        )
+        .build();
         let clock = MockClock::default();
         let ephemeral_datastore = ephemeral_datastore().await;
         let meter = noop_meter();
@@ -455,17 +438,15 @@ mod tests {
                     tx.put_task(&task).await.unwrap();
                     tx.put_report_share(task.id(), &report.0).await.unwrap();
 
-                    tx.put_aggregation_job(
-                        &AggregationJob::<0, TimeInterval, dummy_vdaf::Vdaf>::new(
-                            *task.id(),
-                            aggregation_job_id,
-                            dummy_vdaf::AggregationParam::default(),
-                            (),
-                            Interval::from_time(report.0.metadata().time()).unwrap(),
-                            AggregationJobState::InProgress,
-                            AggregationJobRound::from(0),
-                        ),
-                    )
+                    tx.put_aggregation_job(&AggregationJob::<0, FixedSize, dummy_vdaf::Vdaf>::new(
+                        *task.id(),
+                        aggregation_job_id,
+                        dummy_vdaf::AggregationParam::default(),
+                        random(),
+                        Interval::from_time(report.0.metadata().time()).unwrap(),
+                        AggregationJobState::InProgress,
+                        AggregationJobRound::from(0),
+                    ))
                     .await
                     .unwrap();
 
@@ -611,7 +592,7 @@ mod tests {
                         .unwrap();
 
                     let aggregation_job = tx
-                        .get_aggregation_job::<0, TimeInterval, dummy_vdaf::Vdaf>(
+                        .get_aggregation_job::<0, FixedSize, dummy_vdaf::Vdaf>(
                             &task_id,
                             &aggregation_job_id,
                         )
@@ -661,7 +642,7 @@ mod tests {
                     (*test_case.task.id(), test_case.aggregation_job_id);
                 Box::pin(async move {
                     let aggregation_job = tx
-                        .get_aggregation_job::<0, TimeInterval, dummy_vdaf::Vdaf>(
+                        .get_aggregation_job::<0, FixedSize, dummy_vdaf::Vdaf>(
                             &task_id,
                             &aggregation_job_id,
                         )
@@ -703,7 +684,7 @@ mod tests {
                     // round mismatch error instead of tripping the check for a request to continue
                     // to round 0.
                     let aggregation_job = tx
-                        .get_aggregation_job::<0, TimeInterval, dummy_vdaf::Vdaf>(
+                        .get_aggregation_job::<0, FixedSize, dummy_vdaf::Vdaf>(
                             &task_id,
                             &aggregation_job_id,
                         )

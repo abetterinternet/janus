@@ -11,8 +11,10 @@
   - "https://example.com/"
   - "https://example.net/"
 
-  # The DAP query type. See below for an example of a fixed-size task
-  query_type: TimeInterval
+  # For tasks using the fixed size query type, an additional `max_batch_size`
+  # parameter must be provided.
+  query_type: !FixedSize
+    max_batch_size: 100
 
   # The task's VDAF. Each VDAF requires its own set of parameters.
   vdaf: !Prio3Sum
@@ -100,42 +102,3 @@
       aead_id: Aes128Gcm
       public_key: bK5esYAgvRb7eWto4IlzDV5fMpmdTeO0K56sV-rf9xo
     private_key: wFRYwiypcHC-mkGP1u3XQgIvtnlkQlUfZjgtM_zRsnI
-
-- task_id: "D-hCKPuqL2oTf7ZVRVyMP5VGt43EAEA8q34mDf6p1JE"
-  aggregator_endpoints:
-  - "https://example.org/"
-  - "https://example.com/"
-  # For tasks using the fixed size query type, an additional `max_batch_size`
-  # parameter must be provided.
-  query_type: !FixedSize
-    max_batch_size: 100
-  vdaf: Prio3Count
-  role: Helper
-  vdaf_verify_keys:
-  - "ZXtE4kLqtsCOr8h_pNUeoQ"
-  max_batch_query_count: 1
-  task_expiration: 1704088800
-  report_expiry_age: null
-  min_batch_size: 100
-  time_precision: 300
-  tolerable_clock_skew: 60
-  collector_hpke_config:
-    id: 80
-    kem_id: X25519HkdfSha256
-    kdf_id: HkdfSha256
-    aead_id: Aes128Gcm
-    public_key: KHRLcWgfWxli8cdOLPsgsZPttHXh0ho3vLVLrW-63lE
-  aggregator_auth_tokens:
-  - type: "Bearer"
-    token: "YWdncmVnYXRvci1jZmE4NDMyZjdkMzllMjZiYjU3OGUzMzY5Mzk1MWQzNQ=="
-  # Note that this task does not have any collector authentication tokens, since
-  # it is a helper role task.
-  collector_auth_tokens: []
-  hpke_keys:
-  - config:
-      id: 37
-      kem_id: X25519HkdfSha256
-      kdf_id: HkdfSha256
-      aead_id: Aes128Gcm
-      public_key: nvoVceq50ScadLoeE3E4tgFkzF85UfdiEQOPZSKVx0Y
-    private_key: oA38bVlfuTvi_rg6ciYI1S0tWQuwwDhBDzHSBXKCYVc

@@ -125,7 +125,7 @@ async fn graceful_shutdown(binary: &Path, mut config: Mapping) {
     );
 
     let task = TaskBuilder::new(
-        QueryType::TimeInterval,
+        QueryType::FixedSize { max_batch_size: 10 },
         VdafInstance::Prio3Count,
         Role::Leader,
     )

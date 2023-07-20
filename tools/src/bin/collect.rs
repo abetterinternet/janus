@@ -15,9 +15,8 @@ use fixed::{FixedI16, FixedI32, FixedI64};
 use janus_collector::{default_http_client, AuthenticationToken, Collector, CollectorParameters};
 use janus_core::{hpke::HpkePrivateKey, task::DapAuthToken};
 use janus_messages::{
-    query_type::{FixedSize, QueryType, TimeInterval},
-    BatchId, Duration, FixedSizeQuery, HpkeConfig, Interval, PartialBatchSelector, Query, TaskId,
-    Time,
+    query_type::{FixedSize, QueryType},
+    BatchId, FixedSizeQuery, HpkeConfig, PartialBatchSelector, Query, TaskId,
 };
 #[cfg(feature = "fpvec_bounded_l2")]
 use prio::vdaf::prio3::Prio3FixedPointBoundedL2VecSumMultithreaded;
@@ -283,26 +282,11 @@ struct AuthenticationOptions {
 #[derive(Debug, Args, PartialEq, Eq)]
 #[group(required = true)]
 struct QueryOptions {
-    /// Start of the collection batch interval, as the number of seconds since the Unix epoch
-    #[clap(
-        long,
-        requires = "batch_interval_duration",
-        help_heading = "Collect Request Parameters (Time Interval)"
-    )]
-    batch_interval_start: Option<u64>,
-    /// Duration of the collection batch interval, in seconds
-    #[clap(
-        long,
-        requires = "batch_interval_start",
-        help_heading = "Collect Request Parameters (Time Interval)"
-    )]
-    batch_interval_duration: Option<u64>,
-
     /// Batch identifier, encoded with base64url
     #[clap(
         long,
         value_parser = BatchIdValueParser::new(),
-        conflicts_with_all = ["batch_interval_start", "batch_interval_duration", "current_batch"],
+        conflicts_with_all = ["current_batch"],
         help_heading = "Collect Request Parameters (Fixed Size)",
     )]
     batch_id: Option<BatchId>,
@@ -310,7 +294,7 @@ struct QueryOptions {
     #[clap(
         long,
         action = ArgAction::SetTrue,
-        conflicts_with_all = ["batch_interval_start", "batch_interval_duration", "batch_id"],
+        conflicts_with_all = ["batch_id"],
         help_heading = "Collect Request Parameters (Fixed Size)",
     )]
     current_batch: bool,
@@ -410,21 +394,8 @@ async fn main() -> anyhow::Result<()> {
 
 // This function is broken out from `main()` for the sake of testing its argument handling.
 async fn run(options: Options) -> Result<(), Error> {
-    match (
-        &options.query.batch_interval_start,
-        &options.query.batch_interval_duration,
-        &options.query.batch_id,
-        options.query.current_batch,
-    ) {
-        (Some(batch_interval_start), Some(batch_interval_duration), None, false) => {
-            let batch_interval = Interval::new(
-                Time::from_seconds_since_epoch(*batch_interval_start),
-                Duration::from_seconds(*batch_interval_duration),
-            )
-            .map_err(|err| Error::Anyhow(err.into()))?;
-            run_with_query(options, Query::new_time_interval(batch_interval)).await
-        }
-        (None, None, Some(batch_id), false) => {
+    match (&options.query.batch_id, options.query.current_batch) {
+        (Some(batch_id), false) => {
             let batch_id = *batch_id;
             run_with_query(
                 options,
@@ -432,7 +403,7 @@ async fn run(options: Options) -> Result<(), Error> {
             )
             .await
         }
-        (None, None, None, true) => {
+        (None, true) => {
             run_with_query(options, Query::new_fixed_size(FixedSizeQuery::CurrentBatch)).await
         }
         _ => unreachable!(),
@@ -584,14 +555,6 @@ trait QueryTypeExt: QueryType {
         -> String;
 }
 
-impl QueryTypeExt for TimeInterval {
-    const IS_PARTIAL_BATCH_SELECTOR_TRIVIAL: bool = true;
-
-    fn format_partial_batch_selector(_: &PartialBatchSelector<Self>) -> String {
-        "()".to_string()
-    }
-}
-
 impl QueryTypeExt for FixedSize {
     const IS_PARTIAL_BATCH_SELECTOR_TRIVIAL: bool = false;
 
@@ -605,10 +568,8 @@ impl QueryTypeExt for FixedSize {
 #[cfg(test)]
 mod tests {
     use crate::{
-        run, AuthenticationOptions, AuthenticationToken, DapAuthToken, Error, Options,
-        QueryOptions, VdafType,
+        AuthenticationOptions, AuthenticationToken, DapAuthToken, Options, QueryOptions, VdafType,
     };
-    use assert_matches::assert_matches;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use clap::{error::ErrorKind, CommandFactory, Parser};
     use janus_core::hpke::test_util::generate_test_hpke_config_and_private_key;
@@ -620,261 +581,6 @@ mod tests {
     #[test]
     fn verify_app() {
         Options::command().debug_assert();
-    }
-
-    #[tokio::test]
-    async fn argument_handling() {
-        let hpke_keypair = generate_test_hpke_config_and_private_key();
-        let encoded_hpke_config = URL_SAFE_NO_PAD.encode(hpke_keypair.config().get_encoded());
-        let encoded_private_key = URL_SAFE_NO_PAD.encode(hpke_keypair.private_key().as_ref());
-
-        let task_id = random();
-        let leader = Url::parse("https://example.com/dap/").unwrap();
-
-        let expected = Options {
-            task_id,
-            leader: leader.clone(),
-            authentication: AuthenticationOptions {
-                dap_auth_token: Some(AuthenticationToken::DapAuth(
-                    DapAuthToken::try_from(b"collector-authentication-token".to_vec()).unwrap(),
-                )),
-                authorization_bearer_token: None,
-            },
-            hpke_config: hpke_keypair.config().clone(),
-            hpke_private_key: hpke_keypair.private_key().clone(),
-            vdaf: VdafType::Count,
-            length: None,
-            bits: None,
-            buckets: None,
-            query: QueryOptions {
-                batch_interval_start: Some(1_000_000),
-                batch_interval_duration: Some(1_000),
-                batch_id: None,
-                current_batch: false,
-            },
-        };
-        let task_id_encoded = URL_SAFE_NO_PAD.encode(task_id.get_encoded());
-        let correct_arguments = [
-            "collect",
-            &format!("--task-id={task_id_encoded}"),
-            "--leader",
-            leader.as_str(),
-            "--dap-auth-token",
-            "collector-authentication-token",
-            &format!("--hpke-config={encoded_hpke_config}"),
-            &format!("--hpke-private-key={encoded_private_key}"),
-            "--vdaf",
-            "count",
-            "--batch-interval-start",
-            "1000000",
-            "--batch-interval-duration",
-            "1000",
-        ];
-        match Options::try_parse_from(correct_arguments) {
-            Ok(got) => assert_eq!(got, expected),
-            Err(e) => panic!("{}\narguments were {:?}", e, correct_arguments),
-        }
-
-        assert_eq!(
-            Options::try_parse_from(["collect"]).unwrap_err().kind(),
-            ErrorKind::MissingRequiredArgument,
-        );
-
-        let mut bad_arguments = correct_arguments;
-        bad_arguments[1] = "--task-id=not valid base64";
-        assert_eq!(
-            Options::try_parse_from(bad_arguments).unwrap_err().kind(),
-            ErrorKind::ValueValidation,
-        );
-
-        let mut bad_arguments = correct_arguments;
-        let short_encoded = URL_SAFE_NO_PAD.encode("too short");
-        let bad_argument = format!("--task-id={short_encoded}");
-        bad_arguments[1] = &bad_argument;
-        assert_eq!(
-            Options::try_parse_from(bad_arguments).unwrap_err().kind(),
-            ErrorKind::ValueValidation,
-        );
-
-        let mut bad_arguments = correct_arguments;
-        bad_arguments[3] = "http:bad:url:///dap@";
-        assert_eq!(
-            Options::try_parse_from(bad_arguments).unwrap_err().kind(),
-            ErrorKind::ValueValidation,
-        );
-
-        let mut bad_arguments = correct_arguments;
-        bad_arguments[6] = "--hpke-config=not valid base64";
-        assert_eq!(
-            Options::try_parse_from(bad_arguments).unwrap_err().kind(),
-            ErrorKind::ValueValidation,
-        );
-
-        let mut bad_arguments = correct_arguments;
-        bad_arguments[7] = "--hpke-private-key=not valid base64";
-        assert_eq!(
-            Options::try_parse_from(bad_arguments).unwrap_err().kind(),
-            ErrorKind::ValueValidation,
-        );
-
-        let base_arguments = Vec::from([
-            "collect".to_string(),
-            format!("--task-id={task_id_encoded}"),
-            "--leader".to_string(),
-            leader.to_string(),
-            "--dap-auth-token".to_string(),
-            "collector-authentication-token".to_string(),
-            format!("--hpke-config={encoded_hpke_config}"),
-            format!("--hpke-private-key={encoded_private_key}"),
-            "--batch-interval-start".to_string(),
-            "1000000".to_string(),
-            "--batch-interval-duration".to_string(),
-            "1000".to_string(),
-        ]);
-
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.extend(["--vdaf=count".to_string(), "--buckets=1,2,3,4".to_string()]);
-        let bad_options = Options::try_parse_from(bad_arguments).unwrap();
-        assert_matches!(
-            run(bad_options).await.unwrap_err(),
-            Error::Clap(err) => assert_eq!(err.kind(), ErrorKind::ArgumentConflict)
-        );
-
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.extend(["--vdaf=sum".to_string(), "--buckets=1,2,3,4".to_string()]);
-        let bad_options = Options::try_parse_from(bad_arguments).unwrap();
-        assert_matches!(
-            run(bad_options).await.unwrap_err(),
-            Error::Clap(err) => assert_eq!(err.kind(), ErrorKind::ArgumentConflict)
-        );
-
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.extend([
-            "--vdaf=countvec".to_string(),
-            "--buckets=1,2,3,4".to_string(),
-        ]);
-        let bad_options = Options::try_parse_from(bad_arguments).unwrap();
-        assert_matches!(
-            run(bad_options).await.unwrap_err(),
-            Error::Clap(err) => assert_eq!(err.kind(), ErrorKind::ArgumentConflict)
-        );
-
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.extend(["--vdaf=countvec".to_string(), "--bits=3".to_string()]);
-        let bad_options = Options::try_parse_from(bad_arguments).unwrap();
-        assert_matches!(
-            run(bad_options).await.unwrap_err(),
-            Error::Clap(err) => assert_eq!(err.kind(), ErrorKind::ArgumentConflict)
-        );
-
-        #[cfg(feature = "fpvec_bounded_l2")]
-        {
-            let mut bad_arguments = base_arguments.clone();
-            bad_arguments.extend([
-                "--vdaf=fixedpoint16bitboundedl2vecsum".to_string(),
-                "--bits=3".to_string(),
-            ]);
-            let bad_options = Options::try_parse_from(bad_arguments).unwrap();
-            assert_matches!(
-                run(bad_options).await.unwrap_err(),
-                Error::Clap(err) => assert_eq!(err.kind(), ErrorKind::ArgumentConflict)
-            );
-
-            let mut bad_arguments = base_arguments.clone();
-            bad_arguments.extend([
-                "--vdaf=fixedpoint32bitboundedl2vecsum".to_string(),
-                "--bits=3".to_string(),
-            ]);
-            let bad_options = Options::try_parse_from(bad_arguments).unwrap();
-            assert_matches!(
-                run(bad_options).await.unwrap_err(),
-                Error::Clap(err) => assert_eq!(err.kind(), ErrorKind::ArgumentConflict)
-            );
-
-            let mut bad_arguments = base_arguments.clone();
-            bad_arguments.extend([
-                "--vdaf=fixedpoint64bitboundedl2vecsum".to_string(),
-                "--bits=3".to_string(),
-            ]);
-            let bad_options = Options::try_parse_from(bad_arguments).unwrap();
-            assert_matches!(
-                run(bad_options).await.unwrap_err(),
-                Error::Clap(err) => assert_eq!(err.kind(), ErrorKind::ArgumentConflict)
-            );
-        }
-
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.extend([
-            "--vdaf=histogram".to_string(),
-            "--buckets=1,2,3,4,apple".to_string(),
-        ]);
-        assert_eq!(
-            Options::try_parse_from(bad_arguments).unwrap_err().kind(),
-            ErrorKind::ValueValidation
-        );
-
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.extend(["--vdaf=histogram".to_string()]);
-        let bad_options = Options::try_parse_from(bad_arguments).unwrap();
-        assert_matches!(
-            run(bad_options).await.unwrap_err(),
-            Error::Clap(err) => assert_eq!(err.kind(), ErrorKind::ArgumentConflict)
-        );
-
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.extend(["--vdaf=sum".to_string()]);
-        let bad_options = Options::try_parse_from(bad_arguments).unwrap();
-        assert_matches!(
-            run(bad_options).await.unwrap_err(),
-            Error::Clap(err) => assert_eq!(err.kind(), ErrorKind::ArgumentConflict)
-        );
-
-        let mut good_arguments = base_arguments.clone();
-        good_arguments.extend(["--vdaf=countvec".to_string(), "--length=10".to_string()]);
-        Options::try_parse_from(good_arguments).unwrap();
-
-        let mut good_arguments = base_arguments.clone();
-        good_arguments.extend(["--vdaf=sum".to_string(), "--bits=8".to_string()]);
-        Options::try_parse_from(good_arguments).unwrap();
-
-        let mut good_arguments = base_arguments.clone();
-        good_arguments.extend([
-            "--vdaf=sumvec".to_string(),
-            "--bits=8".to_string(),
-            "--length=10".to_string(),
-        ]);
-        Options::try_parse_from(good_arguments).unwrap();
-
-        let mut good_arguments = base_arguments.clone();
-        good_arguments.extend([
-            "--vdaf=histogram".to_string(),
-            "--buckets=1,2,3,4".to_string(),
-        ]);
-        Options::try_parse_from(good_arguments).unwrap();
-
-        #[cfg(feature = "fpvec_bounded_l2")]
-        {
-            let mut good_arguments = base_arguments.clone();
-            good_arguments.extend([
-                "--vdaf=fixedpoint16bitboundedl2vecsum".to_string(),
-                "--length=10".to_string(),
-            ]);
-            Options::try_parse_from(good_arguments).unwrap();
-
-            let mut good_arguments = base_arguments.clone();
-            good_arguments.extend([
-                "--vdaf=fixedpoint32bitboundedl2vecsum".to_string(),
-                "--length=10".to_string(),
-            ]);
-            Options::try_parse_from(good_arguments).unwrap();
-
-            let mut good_arguments = base_arguments.clone();
-            good_arguments.extend([
-                "--vdaf=fixedpoint64bitboundedl2vecsum".to_string(),
-                "--length=10".to_string(),
-            ]);
-            Options::try_parse_from(good_arguments).unwrap();
-        }
     }
 
     #[test]
@@ -906,8 +612,6 @@ mod tests {
             bits: None,
             buckets: None,
             query: QueryOptions {
-                batch_interval_start: None,
-                batch_interval_duration: None,
                 batch_id: None,
                 current_batch: true,
             },
@@ -947,8 +651,6 @@ mod tests {
             bits: None,
             buckets: None,
             query: QueryOptions {
-                batch_interval_start: None,
-                batch_interval_duration: None,
                 batch_id: Some(batch_id),
                 current_batch: false,
             },
@@ -998,71 +700,6 @@ mod tests {
             ErrorKind::MissingRequiredArgument
         );
 
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.push("--batch-interval-start=1".to_string());
-        assert_eq!(
-            Options::try_parse_from(bad_arguments).unwrap_err().kind(),
-            ErrorKind::MissingRequiredArgument
-        );
-
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.push("--batch-interval-duration=1".to_string());
-        assert_eq!(
-            Options::try_parse_from(bad_arguments).unwrap_err().kind(),
-            ErrorKind::MissingRequiredArgument
-        );
-
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.extend([
-            "--batch-interval-start=1".to_string(),
-            "--batch-interval-duration=1".to_string(),
-            "--batch-id=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
-        ]);
-        assert_eq!(
-            Options::try_parse_from(bad_arguments).unwrap_err().kind(),
-            ErrorKind::ArgumentConflict
-        );
-
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.extend([
-            "--batch-interval-start=1".to_string(),
-            "--batch-id=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
-        ]);
-        assert_eq!(
-            Options::try_parse_from(bad_arguments).unwrap_err().kind(),
-            ErrorKind::ArgumentConflict
-        );
-
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.extend([
-            "--batch-interval-duration=1".to_string(),
-            "--batch-id=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
-        ]);
-        assert_eq!(
-            Options::try_parse_from(bad_arguments).unwrap_err().kind(),
-            ErrorKind::ArgumentConflict
-        );
-
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.extend([
-            "--batch-interval-start=1".to_string(),
-            "--current-batch".to_string(),
-        ]);
-        assert_eq!(
-            Options::try_parse_from(bad_arguments).unwrap_err().kind(),
-            ErrorKind::ArgumentConflict
-        );
-
-        let mut bad_arguments = base_arguments.clone();
-        bad_arguments.extend([
-            "--batch-interval-duration=1".to_string(),
-            "--current-batch".to_string(),
-        ]);
-        assert_eq!(
-            Options::try_parse_from(bad_arguments).unwrap_err().kind(),
-            ErrorKind::ArgumentConflict
-        );
-
         let mut bad_arguments = base_arguments;
         bad_arguments.extend([
             "--batch-id=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
@@ -1090,10 +727,7 @@ mod tests {
             "https://example.com/dap/".to_string(),
             format!("--hpke-config={encoded_hpke_config}"),
             format!("--hpke-private-key={encoded_private_key}"),
-            "--batch-interval-start".to_string(),
-            "1000000".to_string(),
-            "--batch-interval-duration".to_string(),
-            "1000".to_string(),
+            "--current-batch".to_string(),
             "--vdaf=count".to_string(),
         ]);
         let dap_auth_token_arguments = Vec::from([

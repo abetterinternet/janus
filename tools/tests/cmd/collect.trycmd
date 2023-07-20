@@ -2,7 +2,7 @@
 $ collect --help
 Command-line DAP-PPM collector from ISRG's Divvi Up
 
-Usage: collect [OPTIONS] --task-id <TASK_ID> --leader <LEADER> --hpke-config <HPKE_CONFIG> --hpke-private-key <HPKE_PRIVATE_KEY> --vdaf <VDAF> <--dap-auth-token <DAP_AUTH_TOKEN>|--authorization-bearer-token <AUTHORIZATION_BEARER_TOKEN>> <--batch-interval-start <BATCH_INTERVAL_START>|--batch-interval-duration <BATCH_INTERVAL_DURATION>|--batch-id <BATCH_ID>|--current-batch>
+Usage: collect [OPTIONS] --task-id <TASK_ID> --leader <LEADER> --hpke-config <HPKE_CONFIG> --hpke-private-key <HPKE_PRIVATE_KEY> --vdaf <VDAF> <--dap-auth-token <DAP_AUTH_TOKEN>|--authorization-bearer-token <AUTHORIZATION_BEARER_TOKEN>> <--batch-id <BATCH_ID>|--current-batch>
 
 Options:
   -h, --help
@@ -56,13 +56,6 @@ VDAF Algorithm and Parameters:
 
       --buckets <BUCKETS>
           Comma-separated list of bucket boundaries, for use with --vdaf=histogram
-
-Collect Request Parameters (Time Interval):
-      --batch-interval-start <BATCH_INTERVAL_START>
-          Start of the collection batch interval, as the number of seconds since the Unix epoch
-
-      --batch-interval-duration <BATCH_INTERVAL_DURATION>
-          Duration of the collection batch interval, in seconds
 
 Collect Request Parameters (Fixed Size):
       --batch-id <BATCH_ID>

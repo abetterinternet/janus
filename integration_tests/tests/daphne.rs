@@ -18,8 +18,10 @@ async fn daphne_janus() {
 
     // Start servers.
     let network = generate_network_name();
-    let (mut task_parameters, leader_task, helper_task) =
-        test_task_builders(VdafInstance::Prio3Count, QueryType::TimeInterval);
+    let (mut task_parameters, leader_task, helper_task) = test_task_builders(
+        VdafInstance::Prio3Count,
+        QueryType::FixedSize { max_batch_size: 46 },
+    );
 
     // Daphne is hardcoded to serve from a path starting with /v04/.
     task_parameters.endpoint_fragments.leader_endpoint_path = "/v04/".to_string();
@@ -54,8 +56,10 @@ async fn janus_daphne() {
 
     // Start servers.
     let network = generate_network_name();
-    let (mut task_parameters, leader_task, helper_task) =
-        test_task_builders(VdafInstance::Prio3Count, QueryType::TimeInterval);
+    let (mut task_parameters, leader_task, helper_task) = test_task_builders(
+        VdafInstance::Prio3Count,
+        QueryType::FixedSize { max_batch_size: 46 },
+    );
 
     // Daphne is hardcoded to serve from a path starting with /v04/.
     task_parameters.endpoint_fragments.helper_endpoint_path = "/v04/".to_string();

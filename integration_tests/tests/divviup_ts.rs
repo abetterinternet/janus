@@ -17,7 +17,7 @@ mod common;
 
 async fn run_divviup_ts_integration_test(container_client: &Cli, vdaf: VdafInstance) {
     let (task_parameters, leader_task, helper_task) =
-        test_task_builders(vdaf, QueryType::TimeInterval);
+        test_task_builders(vdaf, QueryType::FixedSize { max_batch_size: 46 });
     let network = generate_network_name();
     let leader = Janus::new(container_client, &network, &leader_task.build()).await;
     let helper = Janus::new(container_client, &network, &helper_task.build()).await;

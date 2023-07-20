@@ -19,8 +19,7 @@ use janus_interop_binaries::{
     ErrorHandler, HpkeConfigRegistry, NumberAsString, VdafObject,
 };
 use janus_messages::{
-    query_type::QueryType, BatchId, Duration, FixedSizeQuery, HpkeConfig, Interval,
-    PartialBatchSelector, Query, TaskId, Time,
+    query_type::QueryType, BatchId, FixedSizeQuery, HpkeConfig, PartialBatchSelector, Query, TaskId,
 };
 #[cfg(feature = "fpvec_bounded_l2")]
 use prio::vdaf::prio3::Prio3FixedPointBoundedL2VecSumMultithreaded;
@@ -63,8 +62,6 @@ struct AddTaskResponse {
 struct RequestQuery {
     #[serde(rename = "type")]
     query_type: u8,
-    batch_interval_start: Option<u64>,
-    batch_interval_duration: Option<u64>,
     subtype: Option<u8>,
     batch_id: Option<String>,
 }
@@ -213,7 +210,6 @@ where
 }
 
 enum ParsedQuery {
-    TimeInterval(Interval),
     FixedSize(FixedSizeQuery),
 }
 
@@ -260,23 +256,6 @@ async fn handle_collection_start(
     );
 
     let query = match request.query.query_type {
-        1 => {
-            let start = Time::from_seconds_since_epoch(
-                request
-                    .query
-                    .batch_interval_start
-                    .context("\"batch_interval_start\" was missing")?,
-            );
-            let duration = Duration::from_seconds(
-                request
-                    .query
-                    .batch_interval_duration
-                    .context("\"batch_interval_duration\" was missing")?,
-            );
-            let interval =
-                Interval::new(start, duration).context("invalid batch interval specification")?;
-            ParsedQuery::TimeInterval(interval)
-        }
         2 => match request.query.subtype {
             Some(0) => {
                 let batch_id_bytes = URL_SAFE_NO_PAD
@@ -299,157 +278,6 @@ async fn handle_collection_start(
 
     let vdaf_instance = task_state.vdaf.clone().into();
     let task_handle = match (query, vdaf_instance) {
-        (ParsedQuery::TimeInterval(batch_interval), VdafInstance::Prio3Count {}) => {
-            let vdaf = Prio3::new_count(2).context("failed to construct Prio3Count VDAF")?;
-            handle_collect_generic(
-                http_client,
-                collector_params,
-                Query::new_time_interval(batch_interval),
-                vdaf,
-                &agg_param,
-                |_| None,
-                |result| AggregationResult::Number(NumberAsString((*result).into())),
-            )
-            .await?
-        }
-
-        (ParsedQuery::TimeInterval(batch_interval), VdafInstance::Prio3CountVec { length }) => {
-            let vdaf = Prio3::new_sum_vec_multithreaded(2, 1, length)
-                .context("failed to construct Prio3CountVec VDAF")?;
-            handle_collect_generic(
-                http_client,
-                collector_params,
-                Query::new_time_interval(batch_interval),
-                vdaf,
-                &agg_param,
-                |_| None,
-                |result| {
-                    let converted = result.iter().cloned().map(NumberAsString).collect();
-                    AggregationResult::NumberVec(converted)
-                },
-            )
-            .await?
-        }
-
-        (ParsedQuery::TimeInterval(batch_interval), VdafInstance::Prio3Sum { bits }) => {
-            let vdaf = Prio3::new_sum(2, bits).context("failed to construct Prio3Sum VDAF")?;
-            handle_collect_generic(
-                http_client,
-                collector_params,
-                Query::new_time_interval(batch_interval),
-                vdaf,
-                &agg_param,
-                |_| None,
-                |result| AggregationResult::Number(NumberAsString(*result)),
-            )
-            .await?
-        }
-
-        (ParsedQuery::TimeInterval(batch_interval), VdafInstance::Prio3SumVec { bits, length }) => {
-            let vdaf = Prio3::new_sum_vec_multithreaded(2, bits, length)
-                .context("failed to construct Prio3SumVec VDAF")?;
-            handle_collect_generic(
-                http_client,
-                collector_params,
-                Query::new_time_interval(batch_interval),
-                vdaf,
-                &agg_param,
-                |_| None,
-                |result| {
-                    let converted = result.iter().cloned().map(NumberAsString).collect();
-                    AggregationResult::NumberVec(converted)
-                },
-            )
-            .await?
-        }
-
-        (ParsedQuery::TimeInterval(batch_interval), VdafInstance::Prio3Histogram { buckets }) => {
-            let vdaf = Prio3::new_histogram(2, &buckets)
-                .context("failed to construct Prio3Histogram VDAF")?;
-            handle_collect_generic(
-                http_client,
-                collector_params,
-                Query::new_time_interval(batch_interval),
-                vdaf,
-                &agg_param,
-                |_| None,
-                |result| {
-                    let converted = result.iter().cloned().map(NumberAsString).collect();
-                    AggregationResult::NumberVec(converted)
-                },
-            )
-            .await?
-        }
-
-        #[cfg(feature = "fpvec_bounded_l2")]
-        (
-            ParsedQuery::TimeInterval(batch_interval),
-            janus_core::task::VdafInstance::Prio3FixedPoint16BitBoundedL2VecSum { length },
-        ) => {
-            let vdaf: Prio3FixedPointBoundedL2VecSumMultithreaded<FixedI16<U15>> =
-                Prio3::new_fixedpoint_boundedl2_vec_sum_multithreaded(2, length)
-                    .context("failed to construct Prio3FixedPoint16BitBoundedL2VecSum VDAF")?;
-            handle_collect_generic(
-                http_client,
-                collector_params,
-                Query::new_time_interval(batch_interval),
-                vdaf,
-                &agg_param,
-                |_| None,
-                |result| {
-                    let converted = result.iter().cloned().map(NumberAsString).collect();
-                    AggregationResult::FloatVec(converted)
-                },
-            )
-            .await?
-        }
-
-        #[cfg(feature = "fpvec_bounded_l2")]
-        (
-            ParsedQuery::TimeInterval(batch_interval),
-            janus_core::task::VdafInstance::Prio3FixedPoint32BitBoundedL2VecSum { length },
-        ) => {
-            let vdaf: Prio3FixedPointBoundedL2VecSumMultithreaded<FixedI32<U31>> =
-                Prio3::new_fixedpoint_boundedl2_vec_sum_multithreaded(2, length)
-                    .context("failed to construct Prio3FixedPoint32BitBoundedL2VecSum VDAF")?;
-            handle_collect_generic(
-                http_client,
-                collector_params,
-                Query::new_time_interval(batch_interval),
-                vdaf,
-                &agg_param,
-                |_| None,
-                |result| {
-                    let converted = result.iter().cloned().map(NumberAsString).collect();
-                    AggregationResult::FloatVec(converted)
-                },
-            )
-            .await?
-        }
-
-        #[cfg(feature = "fpvec_bounded_l2")]
-        (
-            ParsedQuery::TimeInterval(batch_interval),
-            janus_core::task::VdafInstance::Prio3FixedPoint64BitBoundedL2VecSum { length },
-        ) => {
-            let vdaf: Prio3FixedPointBoundedL2VecSumMultithreaded<FixedI64<U63>> =
-                Prio3::new_fixedpoint_boundedl2_vec_sum_multithreaded(2, length)
-                    .context("failed to construct Prio3FixedPoint64BitBoundedL2VecSum VDAF")?;
-            handle_collect_generic(
-                http_client,
-                collector_params,
-                Query::new_time_interval(batch_interval),
-                vdaf,
-                &agg_param,
-                |_| None,
-                |result| {
-                    let converted = result.iter().cloned().map(NumberAsString).collect();
-                    AggregationResult::FloatVec(converted)
-                },
-            )
-            .await?
-        }
-
         (ParsedQuery::FixedSize(fixed_size_query), VdafInstance::Prio3Count {}) => {
             let vdaf = Prio3::new_count(2).context("failed to construct Prio3Count VDAF")?;
             handle_collect_generic(

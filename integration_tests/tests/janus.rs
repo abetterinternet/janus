@@ -54,7 +54,7 @@ async fn janus_janus_count() {
     let janus_pair = JanusPair::new(
         &container_client,
         VdafInstance::Prio3Count,
-        QueryType::TimeInterval,
+        QueryType::FixedSize { max_batch_size: 46 },
     )
     .await;
 
@@ -77,7 +77,7 @@ async fn janus_janus_sum_16() {
     let janus_pair = JanusPair::new(
         &container_client,
         VdafInstance::Prio3Sum { bits: 16 },
-        QueryType::TimeInterval,
+        QueryType::FixedSize { max_batch_size: 46 },
     )
     .await;
 
@@ -102,7 +102,7 @@ async fn janus_janus_histogram_4_buckets() {
     let janus_pair = JanusPair::new(
         &container_client,
         VdafInstance::Prio3Histogram { buckets },
-        QueryType::TimeInterval,
+        QueryType::FixedSize { max_batch_size: 46 },
     )
     .await;
 
@@ -125,30 +125,7 @@ async fn janus_janus_count_vec_15() {
     let janus_pair = JanusPair::new(
         &container_client,
         VdafInstance::Prio3CountVec { length: 15 },
-        QueryType::TimeInterval,
-    )
-    .await;
-
-    // Run the behavioral test.
-    submit_measurements_and_verify_aggregate(
-        &janus_pair.task_parameters,
-        (janus_pair.leader.port(), janus_pair.helper.port()),
-        &ClientBackend::InProcess,
-    )
-    .await;
-}
-
-/// This test exercises the fixed-size query type with Janus as both the leader and the helper.
-#[tokio::test(flavor = "multi_thread")]
-async fn janus_janus_fixed_size() {
-    install_test_trace_subscriber();
-
-    // Start servers.
-    let container_client = container_client();
-    let janus_pair = JanusPair::new(
-        &container_client,
-        VdafInstance::Prio3Count,
-        QueryType::FixedSize { max_batch_size: 50 },
+        QueryType::FixedSize { max_batch_size: 46 },
     )
     .await;
 
@@ -173,7 +150,7 @@ async fn janus_janus_sum_vec() {
             bits: 16,
             length: 15,
         },
-        QueryType::TimeInterval,
+        QueryType::FixedSize { max_batch_size: 46 },
     )
     .await;
 

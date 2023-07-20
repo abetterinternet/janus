@@ -151,7 +151,6 @@ impl InClusterJanusPair {
             vdaf: task.vdaf().try_into().unwrap(),
             min_batch_size: task.min_batch_size(),
             max_batch_size: match task.query_type() {
-                QueryType::TimeInterval => None,
                 QueryType::FixedSize { max_batch_size } => Some(*max_batch_size),
             },
             expiration: "3000-01-01T00:00:00Z".to_owned(),
@@ -227,8 +226,11 @@ async fn in_cluster_count() {
     install_test_trace_subscriber();
 
     // Start port forwards and set up task.
-    let janus_pair =
-        InClusterJanusPair::new(VdafInstance::Prio3Count, QueryType::TimeInterval).await;
+    let janus_pair = InClusterJanusPair::new(
+        VdafInstance::Prio3Count,
+        QueryType::FixedSize { max_batch_size: 46 },
+    )
+    .await;
 
     // Run the behavioral test.
     submit_measurements_and_verify_aggregate(
@@ -244,8 +246,11 @@ async fn in_cluster_sum() {
     install_test_trace_subscriber();
 
     // Start port forwards and set up task.
-    let janus_pair =
-        InClusterJanusPair::new(VdafInstance::Prio3Sum { bits: 16 }, QueryType::TimeInterval).await;
+    let janus_pair = InClusterJanusPair::new(
+        VdafInstance::Prio3Sum { bits: 16 },
+        QueryType::FixedSize { max_batch_size: 46 },
+    )
+    .await;
 
     // Run the behavioral test.
     submit_measurements_and_verify_aggregate(
@@ -264,7 +269,7 @@ async fn in_cluster_histogram() {
     let buckets = Vec::from([3, 6, 8]);
     let janus_pair = InClusterJanusPair::new(
         VdafInstance::Prio3Histogram { buckets },
-        QueryType::TimeInterval,
+        QueryType::FixedSize { max_batch_size: 46 },
     )
     .await;
 

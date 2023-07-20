@@ -4,7 +4,6 @@ use futures::future::join_all;
 use janus_core::{
     task::PRIO3_VERIFY_KEY_LENGTH,
     test_util::{install_test_trace_subscriber, testcontainers::container_client},
-    time::{Clock, RealClock, TimeExt},
 };
 use janus_interop_binaries::{
     test_util::{await_ready_ok, generate_network_name, generate_unique_name},
@@ -12,8 +11,8 @@ use janus_interop_binaries::{
     ContainerLogsDropGuard,
 };
 use janus_messages::{
-    query_type::{FixedSize, QueryType, TimeInterval},
-    Duration, TaskId,
+    query_type::{FixedSize, QueryType},
+    TaskId,
 };
 use prio::codec::Encode;
 use rand::random;
@@ -30,7 +29,6 @@ const JSON_MEDIA_TYPE: &str = "application/json";
 const TIME_PRECISION: u64 = 3600;
 
 enum QueryKind {
-    TimeInterval,
     FixedSize,
 }
 
@@ -46,10 +44,6 @@ async fn run(
     install_test_trace_subscriber();
 
     let (query_type_json, max_batch_size) = match query_kind {
-        QueryKind::TimeInterval => {
-            let query_type = json!(TimeInterval::CODE as u8);
-            (query_type, None)
-        }
         QueryKind::FixedSize => {
             let query_type = json!(FixedSize::CODE as u8);
             (query_type, Some(json!(measurements.len())))
@@ -361,9 +355,6 @@ async fn run(
         helper_add_task_response_object.get("error"),
     );
 
-    // Record the time before generating reports, for use in calculating time interval queries.
-    let start_timestamp = RealClock::default().now();
-
     // Send one or more /internal/test/upload requests to the client.
     for measurement in measurements {
         let upload_response = http_client
@@ -399,20 +390,6 @@ async fn run(
     }
 
     let query_json = match query_kind {
-        QueryKind::TimeInterval => {
-            let batch_interval_start = start_timestamp
-                .to_batch_interval_start(&Duration::from_seconds(TIME_PRECISION))
-                .unwrap()
-                .as_seconds_since_epoch();
-            // Span the aggregation over two time precisions, just in case our measurements spilled over a
-            // batch boundary.
-            let batch_interval_duration = TIME_PRECISION * 2;
-            json!({
-                "type": query_type_json,
-                "batch_interval_start": batch_interval_start,
-                "batch_interval_duration": batch_interval_duration,
-            })
-        }
         QueryKind::FixedSize => {
             json!({
                 "type": query_type_json,
@@ -427,7 +404,6 @@ async fn run(
         .with_initial_interval(StdDuration::from_secs(1))
         .with_max_interval(StdDuration::from_secs(1))
         .with_max_elapsed_time(match query_kind {
-            QueryKind::TimeInterval => Some(StdDuration::from_secs(0)),
             QueryKind::FixedSize => Some(StdDuration::from_secs(15)),
         })
         .build();
@@ -536,14 +512,12 @@ async fn run(
             "error: {:?}",
             collection_poll_response_object.get("error"),
         );
-        if let QueryKind::FixedSize = query_kind {
-            let batch_id_encoded = collection_poll_response_object
-                .get("batch_id")
-                .expect("completed collection_poll response is missing \"batch_id\"")
-                .as_str()
-                .expect("\"batch_id\" value is not a string");
-            URL_SAFE_NO_PAD.decode(batch_id_encoded).unwrap();
-        }
+        let batch_id_encoded = collection_poll_response_object
+            .get("batch_id")
+            .expect("completed collection_poll response is missing \"batch_id\"")
+            .as_str()
+            .expect("\"batch_id\" value is not a string");
+        URL_SAFE_NO_PAD.decode(batch_id_encoded).unwrap();
         collection_poll_response_object
             .get("report_count")
             .expect("completed collection_poll response is missing \"report_count\"")
@@ -569,7 +543,7 @@ async fn run(
 #[tokio::test]
 async fn e2e_prio3_count() {
     let result = run(
-        QueryKind::TimeInterval,
+        QueryKind::FixedSize,
         json!({"type": "Prio3Count"}),
         &[
             json!("0"),
@@ -600,7 +574,7 @@ async fn e2e_prio3_count() {
 #[tokio::test]
 async fn e2e_prio3_sum() {
     let result = run(
-        QueryKind::TimeInterval,
+        QueryKind::FixedSize,
         json!({"type": "Prio3Sum", "bits": "64"}),
         &[
             json!("0"),
@@ -620,7 +594,7 @@ async fn e2e_prio3_sum() {
 #[tokio::test]
 async fn e2e_prio3_sum_vec() {
     let result = run(
-        QueryKind::TimeInterval,
+        QueryKind::FixedSize,
         json!({"type": "Prio3SumVec", "bits": "64", "length": "4"}),
         &[
             json!(["0", "0", "0", "10"]),
@@ -639,7 +613,7 @@ async fn e2e_prio3_sum_vec() {
 #[tokio::test]
 async fn e2e_prio3_histogram() {
     let result = run(
-        QueryKind::TimeInterval,
+        QueryKind::FixedSize,
         json!({
             "type": "Prio3Histogram",
             "buckets": ["0", "1", "10", "100", "1000", "10000", "100000"],
@@ -670,7 +644,7 @@ async fn e2e_prio3_histogram() {
 #[tokio::test]
 async fn e2e_prio3_count_vec() {
     let result = run(
-        QueryKind::TimeInterval,
+        QueryKind::FixedSize,
         json!({"type": "Prio3CountVec", "length": "4"}),
         &[
             json!(["0", "0", "0", "1"]),
@@ -695,7 +669,7 @@ async fn e2e_prio3_fixed16vec() {
     let fp16_8_inv = fixed!(0.125: I1F15);
     let fp16_16_inv = fixed!(0.0625: I1F15);
     let result = run(
-        QueryKind::TimeInterval,
+        QueryKind::FixedSize,
         json!({"type": "Prio3FixedPoint16BitBoundedL2VecSum", "length": "3"}),
         &[
             json!([
@@ -731,7 +705,7 @@ async fn e2e_prio3_fixed32vec() {
     let fp32_8_inv = fixed!(0.125: I1F31);
     let fp32_16_inv = fixed!(0.0625: I1F31);
     let result = run(
-        QueryKind::TimeInterval,
+        QueryKind::FixedSize,
         json!({"type": "Prio3FixedPoint32BitBoundedL2VecSum", "length": "3"}),
         &[
             json!([
@@ -767,114 +741,6 @@ async fn e2e_prio3_fixed64vec() {
     let fp64_8_inv = fixed!(0.125: I1F63);
     let fp64_16_inv = fixed!(0.0625: I1F63);
     let result = run(
-        QueryKind::TimeInterval,
-        json!({"type": "Prio3FixedPoint64BitBoundedL2VecSum", "length": "3"}),
-        &[
-            json!([
-                fp64_4_inv.to_string(),
-                fp64_8_inv.to_string(),
-                fp64_8_inv.to_string()
-            ]),
-            json!([
-                fp64_16_inv.to_string(),
-                fp64_8_inv.to_string(),
-                fp64_16_inv.to_string()
-            ]),
-            json!([
-                fp64_8_inv.to_string(),
-                fp64_8_inv.to_string(),
-                fp64_4_inv.to_string()
-            ]),
-            json!([
-                fp64_16_inv.to_string(),
-                fp64_8_inv.to_string(),
-                fp64_4_inv.to_string()
-            ]),
-        ],
-        b"",
-    )
-    .await;
-    assert_eq!(result, json!(["0.5", "0.5", "0.6875"]));
-}
-
-#[tokio::test]
-async fn e2e_prio3_fixed16vec_fixed_size() {
-    let fp16_4_inv = fixed!(0.25: I1F15);
-    let fp16_8_inv = fixed!(0.125: I1F15);
-    let fp16_16_inv = fixed!(0.0625: I1F15);
-    let result = run(
-        QueryKind::FixedSize,
-        json!({"type": "Prio3FixedPoint16BitBoundedL2VecSum", "length": "3"}),
-        &[
-            json!([
-                fp16_4_inv.to_string(),
-                fp16_8_inv.to_string(),
-                fp16_8_inv.to_string()
-            ]),
-            json!([
-                fp16_16_inv.to_string(),
-                fp16_8_inv.to_string(),
-                fp16_16_inv.to_string()
-            ]),
-            json!([
-                fp16_8_inv.to_string(),
-                fp16_8_inv.to_string(),
-                fp16_4_inv.to_string()
-            ]),
-            json!([
-                fp16_16_inv.to_string(),
-                fp16_8_inv.to_string(),
-                fp16_4_inv.to_string()
-            ]),
-        ],
-        b"",
-    )
-    .await;
-    assert_eq!(result, json!(["0.5", "0.5", "0.6875"]));
-}
-
-#[tokio::test]
-async fn e2e_prio3_fixed32vec_fixed_size() {
-    let fp32_4_inv = fixed!(0.25: I1F31);
-    let fp32_8_inv = fixed!(0.125: I1F31);
-    let fp32_16_inv = fixed!(0.0625: I1F31);
-    let result = run(
-        QueryKind::FixedSize,
-        json!({"type": "Prio3FixedPoint32BitBoundedL2VecSum", "length": "3"}),
-        &[
-            json!([
-                fp32_4_inv.to_string(),
-                fp32_8_inv.to_string(),
-                fp32_8_inv.to_string()
-            ]),
-            json!([
-                fp32_16_inv.to_string(),
-                fp32_8_inv.to_string(),
-                fp32_16_inv.to_string()
-            ]),
-            json!([
-                fp32_8_inv.to_string(),
-                fp32_8_inv.to_string(),
-                fp32_4_inv.to_string()
-            ]),
-            json!([
-                fp32_16_inv.to_string(),
-                fp32_8_inv.to_string(),
-                fp32_4_inv.to_string()
-            ]),
-        ],
-        b"",
-    )
-    .await;
-    assert_eq!(result, json!(["0.5", "0.5", "0.6875"]));
-}
-
-#[tokio::test]
-async fn e2e_prio3_fixed64vec_fixed_size() {
-    let fp64_4_inv = fixed!(0.25: I1F63);
-    let fp64_8_inv = fixed!(0.125: I1F63);
-    let fp64_16_inv = fixed!(0.0625: I1F63);
-    let result = run(
         QueryKind::FixedSize,
         json!({"type": "Prio3FixedPoint64BitBoundedL2VecSum", "length": "3"}),
         &[
@@ -903,27 +769,4 @@ async fn e2e_prio3_fixed64vec_fixed_size() {
     )
     .await;
     assert_eq!(result, json!(["0.5", "0.5", "0.6875"]));
-}
-
-#[tokio::test]
-async fn e2e_prio3_count_fixed_size() {
-    let result = run(
-        QueryKind::FixedSize,
-        json!({"type": "Prio3Count"}),
-        &[
-            json!("0"),
-            json!("1"),
-            json!("1"),
-            json!("1"),
-            json!("0"),
-            json!("1"),
-            json!("0"),
-            json!("1"),
-            json!("0"),
-            json!("0"),
-        ],
-        b"",
-    )
-    .await;
-    assert!(result.is_string());
 }

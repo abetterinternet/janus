@@ -589,13 +589,13 @@ mod tests {
 
         let tasks = Vec::from([
             TaskBuilder::new(
-                QueryType::TimeInterval,
+                QueryType::FixedSize { max_batch_size: 10 },
                 VdafInstance::Prio3Count,
                 Role::Leader,
             )
             .build(),
             TaskBuilder::new(
-                QueryType::TimeInterval,
+                QueryType::FixedSize { max_batch_size: 10 },
                 VdafInstance::Prio3Sum { bits: 64 },
                 Role::Helper,
             )
@@ -622,7 +622,7 @@ mod tests {
         let ds = ephemeral_datastore.datastore(RealClock::default()).await;
 
         let tasks = Vec::from([TaskBuilder::new(
-            QueryType::TimeInterval,
+            QueryType::FixedSize { max_batch_size: 10 },
             VdafInstance::Prio3Count,
             Role::Leader,
         )
@@ -645,13 +645,13 @@ mod tests {
     async fn replace_task() {
         let tasks = Vec::from([
             TaskBuilder::new(
-                QueryType::TimeInterval,
+                QueryType::FixedSize { max_batch_size: 10 },
                 VdafInstance::Prio3Count,
                 Role::Leader,
             )
             .build(),
             TaskBuilder::new(
-                QueryType::TimeInterval,
+                QueryType::FixedSize { max_batch_size: 10 },
                 VdafInstance::Prio3Sum { bits: 64 },
                 Role::Helper,
             )
@@ -719,7 +719,8 @@ mod tests {
 - aggregator_endpoints:
   - https://leader
   - https://helper
-  query_type: TimeInterval
+  query_type: !FixedSize
+    max_batch_size: 100
   vdaf: !Prio3Sum
     bits: 2
   role: Leader
@@ -742,7 +743,8 @@ mod tests {
 - aggregator_endpoints:
   - https://leader
   - https://helper
-  query_type: TimeInterval
+  query_type: !FixedSize
+    max_batch_size: 100
   vdaf: !Prio3Sum
     bits: 2
   role: Helper

@@ -6,9 +6,7 @@ use janus_collector::{
 };
 use janus_core::{
     hpke::test_util::generate_test_hpke_config_and_private_key,
-    retries::test_http_request_exponential_backoff,
-    task::VdafInstance,
-    time::{Clock, RealClock, TimeExt},
+    retries::test_http_request_exponential_backoff, task::VdafInstance,
 };
 use janus_integration_tests::{
     client::{ClientBackend, ClientImplementation, InteropClientEncoding},
@@ -17,7 +15,7 @@ use janus_integration_tests::{
 use janus_messages::{
     problem_type::DapProblemType,
     query_type::{self, FixedSize},
-    Duration, FixedSizeQuery, Interval, Query, Role,
+    FixedSizeQuery, Query, Role,
 };
 use prio::vdaf::{self, prio3::Prio3};
 use rand::{random, thread_rng, Rng};
@@ -121,9 +119,7 @@ pub async fn submit_measurements_and_verify_aggregate_generic<V>(
     V: vdaf::Client<16> + vdaf::Collector + InteropClientEncoding,
     V::AggregateResult: PartialEq,
 {
-    // Submit some measurements, recording a timestamp before measurement upload to allow us to
-    // determine the correct collect interval. (for time interval tasks)
-    let before_timestamp = RealClock::default().now();
+    // Submit some measurements.
     for measurement in test_case.measurements.iter() {
         client_implementation.upload(measurement).await.unwrap();
     }
@@ -154,32 +150,6 @@ pub async fn submit_measurements_and_verify_aggregate_generic<V>(
 
     // Send a collect request and verify that we got the correct result.
     match &task_parameters.query_type {
-        QueryType::TimeInterval => {
-            let batch_interval = Interval::new(
-                before_timestamp
-                    .to_batch_interval_start(&task_parameters.time_precision)
-                    .unwrap(),
-                // Use two time precisions as the interval duration in order to avoid a race condition if
-                // this test happens to run very close to the end of a batch window.
-                Duration::from_seconds(2 * task_parameters.time_precision.as_seconds()),
-            )
-            .unwrap();
-            let collection = collect_generic(
-                &collector,
-                Query::new_time_interval(batch_interval),
-                &test_case.aggregation_parameter,
-                "127.0.0.1",
-                leader_port,
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(
-                collection.report_count(),
-                u64::try_from(test_case.measurements.len()).unwrap()
-            );
-            assert_eq!(collection.aggregate_result(), &test_case.aggregate_result);
-        }
         QueryType::FixedSize { .. } => {
             let mut requests = 0;
             let collection = loop {

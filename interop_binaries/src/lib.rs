@@ -5,7 +5,7 @@ use janus_core::{
     task::VdafInstance,
 };
 use janus_messages::{
-    query_type::{FixedSize, QueryType as _, TimeInterval},
+    query_type::{FixedSize, QueryType as _},
     HpkeAeadId, HpkeConfigId, HpkeKdfId, HpkeKemId, Role, TaskId, Time,
 };
 use prio::codec::Encode;
@@ -280,7 +280,6 @@ pub struct AddTaskResponse {
 impl From<Task> for AggregatorAddTaskRequest {
     fn from(task: Task) -> Self {
         let (query_type, max_batch_size) = match task.query_type() {
-            QueryType::TimeInterval => (TimeInterval::CODE as u8, None),
             QueryType::FixedSize { max_batch_size } => {
                 (FixedSize::CODE as u8, Some(*max_batch_size))
             }

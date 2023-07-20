@@ -75,7 +75,6 @@ async fn handle_add_task(
     let hpke_keypair = keyring.lock().await.get_random_keypair();
 
     let query_type = match request.query_type {
-        1 => task::QueryType::TimeInterval,
         2 => task::QueryType::FixedSize {
             max_batch_size: request
                 .max_batch_size

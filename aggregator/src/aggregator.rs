@@ -42,14 +42,12 @@ use janus_core::{
     time::{Clock, DurationExt, IntervalExt, TimeExt},
 };
 use janus_messages::{
-    problem_type::DapProblemType,
-    query_type::{FixedSize, TimeInterval},
-    AggregateShare, AggregateShareAad, AggregateShareReq, AggregationJobContinueReq,
-    AggregationJobId, AggregationJobInitializeReq, AggregationJobResp, AggregationJobRound,
-    BatchSelector, Collection, CollectionJobId, CollectionReq, Duration, HpkeCiphertext,
-    HpkeConfigList, InputShareAad, Interval, PartialBatchSelector, PlaintextInputShare,
-    PrepareStep, PrepareStepResult, Report, ReportIdChecksum, ReportShare, ReportShareError, Role,
-    TaskId,
+    problem_type::DapProblemType, query_type::FixedSize, AggregateShare, AggregateShareAad,
+    AggregateShareReq, AggregationJobContinueReq, AggregationJobId, AggregationJobInitializeReq,
+    AggregationJobResp, AggregationJobRound, BatchSelector, Collection, CollectionJobId,
+    CollectionReq, Duration, HpkeCiphertext, HpkeConfigList, InputShareAad, Interval,
+    PartialBatchSelector, PlaintextInputShare, PrepareStep, PrepareStepResult, Report,
+    ReportIdChecksum, ReportShare, ReportShareError, Role, TaskId,
 };
 use opentelemetry::{
     metrics::{Counter, Histogram, Meter},
@@ -836,20 +834,6 @@ impl VdafOps {
         report: Report,
     ) -> Result<(), Arc<Error>> {
         match task.query_type() {
-            task::QueryType::TimeInterval => {
-                vdaf_ops_dispatch!(self, (vdaf, _, VdafType, VERIFY_KEY_LENGTH) => {
-                    Self::handle_upload_generic::<VERIFY_KEY_LENGTH, TimeInterval, VdafType, _>(
-                        Arc::clone(vdaf),
-                        clock,
-                        upload_decrypt_failure_counter,
-                        upload_decode_failure_counter,
-                        task,
-                        report_writer,
-                        report,
-                    )
-                    .await
-                })
-            }
             task::QueryType::FixedSize { .. } => {
                 vdaf_ops_dispatch!(self, (vdaf, _, VdafType, VERIFY_KEY_LENGTH) => {
                     Self::handle_upload_generic::<VERIFY_KEY_LENGTH, FixedSize, VdafType, _>(
@@ -883,20 +867,6 @@ impl VdafOps {
         req_bytes: &[u8],
     ) -> Result<AggregationJobResp, Error> {
         match task.query_type() {
-            task::QueryType::TimeInterval => {
-                vdaf_ops_dispatch!(self, (vdaf, verify_key, VdafType, VERIFY_KEY_LENGTH) => {
-                    Self::handle_aggregate_init_generic::<VERIFY_KEY_LENGTH, TimeInterval, VdafType, _>(
-                        datastore,
-                        vdaf,
-                        aggregate_step_failure_counter,
-                        task,
-                        aggregation_job_id,
-                        verify_key,
-                        req_bytes,
-                    )
-                    .await
-                })
-            }
             task::QueryType::FixedSize { .. } => {
                 vdaf_ops_dispatch!(self, (vdaf, verify_key, VdafType, VERIFY_KEY_LENGTH) => {
                     Self::handle_aggregate_init_generic::<VERIFY_KEY_LENGTH, FixedSize, VdafType, _>(
@@ -930,21 +900,6 @@ impl VdafOps {
         request_hash: [u8; 32],
     ) -> Result<AggregationJobResp, Error> {
         match task.query_type() {
-            task::QueryType::TimeInterval => {
-                vdaf_ops_dispatch!(self, (vdaf, _, VdafType, VERIFY_KEY_LENGTH) => {
-                    Self::handle_aggregate_continue_generic::<VERIFY_KEY_LENGTH, TimeInterval, VdafType, _>(
-                        datastore,
-                        Arc::clone(vdaf),
-                        aggregate_step_failure_counter,
-                        task,
-                        batch_aggregation_shard_count,
-                        aggregation_job_id,
-                        req,
-                        request_hash,
-                    )
-                    .await
-                })
-            }
             task::QueryType::FixedSize { .. } => {
                 vdaf_ops_dispatch!(self, (vdaf, _, VdafType, VERIFY_KEY_LENGTH) => {
                     Self::handle_aggregate_continue_generic::<VERIFY_KEY_LENGTH, FixedSize, VdafType, _>(
@@ -1714,17 +1669,6 @@ impl VdafOps {
         collection_req_bytes: &[u8],
     ) -> Result<(), Error> {
         match task.query_type() {
-            task::QueryType::TimeInterval => {
-                vdaf_ops_dispatch!(self, (vdaf, _, VdafType, VERIFY_KEY_LENGTH) => {
-                    Self::handle_create_collection_job_generic::<
-                        VERIFY_KEY_LENGTH,
-                        TimeInterval,
-                        VdafType,
-                        _,
-                    >(datastore, task, Arc::clone(vdaf), collection_job_id, collection_req_bytes)
-                    .await
-                })
-            }
             task::QueryType::FixedSize { .. } => {
                 vdaf_ops_dispatch!(self, (vdaf, _, VdafType, VERIFY_KEY_LENGTH) => {
                     Self::handle_create_collection_job_generic::<
@@ -2015,17 +1959,6 @@ impl VdafOps {
         collection_job_id: &CollectionJobId,
     ) -> Result<Option<Vec<u8>>, Error> {
         match task.query_type() {
-            task::QueryType::TimeInterval => {
-                vdaf_ops_dispatch!(self, (vdaf, _, VdafType, VERIFY_KEY_LENGTH) => {
-                    Self::handle_get_collection_job_generic::<
-                        VERIFY_KEY_LENGTH,
-                        TimeInterval,
-                        VdafType,
-                        _,
-                    >(datastore, task, Arc::clone(vdaf), collection_job_id)
-                    .await
-                })
-            }
             task::QueryType::FixedSize { .. } => {
                 vdaf_ops_dispatch!(self, (vdaf, _, VdafType, VERIFY_KEY_LENGTH) => {
                     Self::handle_get_collection_job_generic::<
@@ -2189,17 +2122,6 @@ impl VdafOps {
         collection_job_id: &CollectionJobId,
     ) -> Result<(), Error> {
         match task.query_type() {
-            task::QueryType::TimeInterval => {
-                vdaf_ops_dispatch!(self, (vdaf, _, VdafType, VERIFY_KEY_LENGTH) => {
-                    Self::handle_delete_collection_job_generic::<
-                        VERIFY_KEY_LENGTH,
-                        TimeInterval,
-                        VdafType,
-                        _,
-                    >(datastore, task, Arc::clone(vdaf), collection_job_id)
-                    .await
-                })
-            }
             task::QueryType::FixedSize { .. } => {
                 vdaf_ops_dispatch!(self, (vdaf, _, VdafType, VERIFY_KEY_LENGTH) => {
                     Self::handle_delete_collection_job_generic::<
@@ -2272,17 +2194,6 @@ impl VdafOps {
         req_bytes: &[u8],
     ) -> Result<AggregateShare, Error> {
         match task.query_type() {
-            task::QueryType::TimeInterval => {
-                vdaf_ops_dispatch!(self, (vdaf, _, VdafType, VERIFY_KEY_LENGTH) => {
-                    Self::handle_aggregate_share_generic::<
-                        VERIFY_KEY_LENGTH,
-                        TimeInterval,
-                        VdafType,
-                        _,
-                    >(datastore, clock, task, Arc::clone(vdaf), req_bytes, batch_aggregation_shard_count)
-                    .await
-                })
-            }
             task::QueryType::FixedSize { .. } => {
                 vdaf_ops_dispatch!(self, (vdaf, _, VdafType, VERIFY_KEY_LENGTH) => {
                     Self::handle_aggregate_share_generic::<
@@ -2636,7 +2547,6 @@ mod tests {
     use futures::future::try_join_all;
     use janus_aggregator_core::{
         datastore::{
-            models::{CollectionJob, CollectionJobState},
             test_util::{ephemeral_datastore, EphemeralDatastore},
             Datastore,
         },
@@ -2645,14 +2555,13 @@ mod tests {
     };
     use janus_core::{
         hpke::{self, HpkeApplicationInfo, Label},
-        task::{VdafInstance, PRIO3_VERIFY_KEY_LENGTH},
+        task::VdafInstance,
         test_util::{dummy_vdaf, install_test_trace_subscriber},
         time::{Clock, MockClock, TimeExt},
     };
     use janus_messages::{
-        query_type::TimeInterval, Duration, Extension, HpkeCiphertext, HpkeConfig, HpkeConfigId,
-        InputShareAad, Interval, PlaintextInputShare, Report, ReportId, ReportMetadata,
-        ReportShare, Role, TaskId, Time,
+        Duration, Extension, HpkeCiphertext, HpkeConfig, HpkeConfigId, InputShareAad,
+        PlaintextInputShare, Report, ReportId, ReportMetadata, ReportShare, Role, TaskId, Time,
     };
     use prio::{
         codec::Encode,
@@ -2733,7 +2642,7 @@ mod tests {
         let clock = MockClock::default();
         let vdaf = Prio3Count::new_count(2).unwrap();
         let task = TaskBuilder::new(
-            QueryType::TimeInterval,
+            QueryType::FixedSize { max_batch_size: 10 },
             VdafInstance::Prio3Count,
             Role::Leader,
         )
@@ -2956,53 +2865,6 @@ mod tests {
             assert_eq!(task.id(), task_id);
             assert_eq!(report.metadata().id(), report_id);
             assert_eq!(report.metadata().time(), time);
-        });
-    }
-
-    #[tokio::test]
-    async fn upload_report_for_collected_batch() {
-        install_test_trace_subscriber();
-
-        let (_, aggregator, clock, task, datastore, _ephemeral_datastore) =
-            setup_upload_test(default_aggregator_config()).await;
-        let report = create_report(&task, clock.now());
-
-        // Insert a collection job for the batch interval including our report.
-        let batch_interval = Interval::new(
-            report
-                .metadata()
-                .time()
-                .to_batch_interval_start(task.time_precision())
-                .unwrap(),
-            *task.time_precision(),
-        )
-        .unwrap();
-        datastore
-            .run_tx(|tx| {
-                let task = task.clone();
-                Box::pin(async move {
-                    tx.put_collection_job(&CollectionJob::<
-                        PRIO3_VERIFY_KEY_LENGTH,
-                        TimeInterval,
-                        Prio3Count,
-                    >::new(
-                        *task.id(),
-                        random(),
-                        batch_interval,
-                        (),
-                        CollectionJobState::Start,
-                    ))
-                    .await
-                })
-            })
-            .await
-            .unwrap();
-
-        // Try to upload the report, verify that we get the expected error.
-        assert_matches!(aggregator.handle_upload(task.id(), &report.get_encoded()).await.unwrap_err().as_ref(), Error::ReportRejected(err_task_id, err_report_id, err_time) => {
-            assert_eq!(task.id(), err_task_id);
-            assert_eq!(report.metadata().id(), err_report_id);
-            assert_eq!(report.metadata().time(), err_time);
         });
     }
 

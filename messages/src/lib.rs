@@ -3,7 +3,7 @@
 //!
 //! [dap]: https://datatracker.ietf.org/doc/draft-ietf-ppm-dap/
 
-use self::query_type::{FixedSize, QueryType, TimeInterval};
+use self::query_type::{FixedSize, QueryType};
 use anyhow::anyhow;
 use base64::{display::Base64Display, engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use derivative::Derivative;
@@ -1440,18 +1440,6 @@ impl<Q: QueryType> Query<Q> {
     }
 }
 
-impl Query<TimeInterval> {
-    /// Constructs a new query for a time-interval task.
-    pub fn new_time_interval(batch_interval: Interval) -> Self {
-        Self::new(batch_interval)
-    }
-
-    /// Gets the batch interval associated with this query.
-    pub fn batch_interval(&self) -> &Interval {
-        self.query_body()
-    }
-}
-
 impl Query<FixedSize> {
     /// Constructs a new query for a fixed-size task.
     pub fn new_fixed_size(fixed_size_query: FixedSizeQuery) -> Self {
@@ -1563,13 +1551,6 @@ impl<Q: QueryType> PartialBatchSelector<Q> {
     /// Query-type specific code will typically call [`Self::batch_id`].
     pub fn batch_identifier(&self) -> &Q::PartialBatchIdentifier {
         &self.batch_identifier
-    }
-}
-
-impl PartialBatchSelector<TimeInterval> {
-    /// Constructs a new partial batch selector for a time-interval task.
-    pub fn new_time_interval() -> Self {
-        Self::new(())
     }
 }
 
@@ -1868,7 +1849,7 @@ impl<Q: QueryType> Decode for AggregateShareAad<Q> {
 pub mod query_type {
     use crate::{Collection, FixedSizeQuery, Query};
 
-    use super::{BatchId, Interval};
+    use super::BatchId;
     use anyhow::anyhow;
     use num_enum::TryFromPrimitive;
     use prio::codec::{CodecError, Decode, Encode};
@@ -1923,29 +1904,6 @@ pub mod query_type {
             query: &Query<Self>,
             collect_resp: &Collection<Self>,
         ) -> Self::BatchIdentifier;
-    }
-
-    /// Represents a `time-interval` DAP query type.
-    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-    pub struct TimeInterval;
-
-    impl QueryType for TimeInterval {
-        const CODE: Code = Code::TimeInterval;
-
-        type BatchIdentifier = Interval;
-        type PartialBatchIdentifier = ();
-        type QueryBody = Interval;
-
-        fn partial_batch_identifier(_: &Self::BatchIdentifier) -> &Self::PartialBatchIdentifier {
-            &()
-        }
-
-        fn batch_identifier_for_collection(
-            query: &Query<Self>,
-            _: &Collection<Self>,
-        ) -> Self::BatchIdentifier {
-            *query.batch_interval()
-        }
     }
 
     /// Represents a `fixed-size` DAP query type.
@@ -2534,18 +2492,6 @@ impl<Q: QueryType> BatchSelector<Q> {
     }
 }
 
-impl BatchSelector<TimeInterval> {
-    /// Constructs a new batch selector for time-interval tasks.
-    pub fn new_time_interval(batch_interval: Interval) -> Self {
-        Self::new(batch_interval)
-    }
-
-    /// Gets the batch interval associated with this batch selector.
-    pub fn batch_interval(&self) -> &Interval {
-        self.batch_identifier()
-    }
-}
-
 impl BatchSelector<FixedSize> {
     /// Constructs a new batch selector for fixed-size tasks.
     pub fn new_fixed_size(batch_id: BatchId) -> Self {
@@ -2745,7 +2691,7 @@ mod tests {
         HpkeConfig, HpkeConfigId, HpkeKdfId, HpkeKemId, HpkePublicKey, InputShareAad, Interval,
         PartialBatchSelector, PlaintextInputShare, PrepareStep, PrepareStepResult, Query, Report,
         ReportId, ReportIdChecksum, ReportMetadata, ReportShare, ReportShareError, Role, TaskId,
-        Time, TimeInterval, Url,
+        Time, Url,
     };
     use assert_matches::assert_matches;
     use prio::codec::{CodecError, Decode, Encode};
@@ -3352,44 +3298,6 @@ mod tests {
 
     #[test]
     fn roundtrip_query() {
-        // TimeInterval.
-        roundtrip_encoding(&[
-            (
-                Query::<TimeInterval> {
-                    query_body: Interval::new(
-                        Time::from_seconds_since_epoch(54321),
-                        Duration::from_seconds(12345),
-                    )
-                    .unwrap(),
-                },
-                concat!(
-                    "01", // query_type
-                    concat!(
-                        // query_body
-                        "000000000000D431", // start
-                        "0000000000003039", // duration
-                    ),
-                ),
-            ),
-            (
-                Query::<TimeInterval> {
-                    query_body: Interval::new(
-                        Time::from_seconds_since_epoch(48913),
-                        Duration::from_seconds(44721),
-                    )
-                    .unwrap(),
-                },
-                concat!(
-                    "01", // query_type
-                    concat!(
-                        // query_body
-                        "000000000000BF11", // start
-                        "000000000000AEB1", // duration
-                    ),
-                ),
-            ),
-        ]);
-
         // FixedSize.
         roundtrip_encoding(&[
             (
@@ -3424,67 +3332,6 @@ mod tests {
 
     #[test]
     fn roundtrip_collection_req() {
-        // TimeInterval.
-        roundtrip_encoding(&[
-            (
-                CollectionReq::<TimeInterval> {
-                    query: Query {
-                        query_body: Interval::new(
-                            Time::from_seconds_since_epoch(54321),
-                            Duration::from_seconds(12345),
-                        )
-                        .unwrap(),
-                    },
-                    aggregation_parameter: Vec::new(),
-                },
-                concat!(
-                    concat!(
-                        // query
-                        "01", // query_type
-                        concat!(
-                            // query_body
-                            "000000000000D431", // start
-                            "0000000000003039", // duration
-                        ),
-                    ),
-                    concat!(
-                        // aggregation_parameter
-                        "00000000", // length
-                        "",         // opaque data
-                    ),
-                ),
-            ),
-            (
-                CollectionReq::<TimeInterval> {
-                    query: Query {
-                        query_body: Interval::new(
-                            Time::from_seconds_since_epoch(48913),
-                            Duration::from_seconds(44721),
-                        )
-                        .unwrap(),
-                    },
-                    aggregation_parameter: Vec::from("012345"),
-                },
-                concat!(
-                    concat!(
-                        // query
-                        "01", // query_type
-                        concat!(
-                            // batch_interval
-                            "000000000000BF11", // start
-                            "000000000000AEB1", // duration
-                        ),
-                    ),
-                    concat!(
-                        // aggregation_parameter
-                        "00000006",     // length
-                        "303132333435", // opaque data
-                    ),
-                ),
-            ),
-        ]);
-
-        // FixedSize.
         roundtrip_encoding(&[
             (
                 CollectionReq::<FixedSize> {
@@ -3538,15 +3385,6 @@ mod tests {
 
     #[test]
     fn roundtrip_partial_batch_selector() {
-        // TimeInterval.
-        roundtrip_encoding(&[(
-            PartialBatchSelector::new_time_interval(),
-            concat!(
-                "01", // query_type
-            ),
-        )]);
-
-        // FixedSize.
         roundtrip_encoding(&[
             (
                 PartialBatchSelector::new_fixed_size(BatchId::from([3u8; 32])),
@@ -3571,96 +3409,6 @@ mod tests {
             start: Time::from_seconds_since_epoch(54321),
             duration: Duration::from_seconds(12345),
         };
-        // TimeInterval.
-        roundtrip_encoding(&[
-            (
-                Collection {
-                    partial_batch_selector: PartialBatchSelector::new_time_interval(),
-                    report_count: 0,
-                    interval,
-                    encrypted_aggregate_shares: Vec::new(),
-                },
-                concat!(
-                    concat!(
-                        // partial_batch_selector
-                        "01", // query_type
-                    ),
-                    "0000000000000000", // report_count
-                    concat!(
-                        // interval
-                        "000000000000D431", // start
-                        "0000000000003039", // duration
-                    ),
-                    concat!(
-                        // encrypted_aggregate_shares
-                        "00000000", // length
-                    )
-                ),
-            ),
-            (
-                Collection {
-                    partial_batch_selector: PartialBatchSelector::new_time_interval(),
-                    report_count: 23,
-                    interval,
-                    encrypted_aggregate_shares: Vec::from([
-                        HpkeCiphertext::new(
-                            HpkeConfigId::from(10),
-                            Vec::from("0123"),
-                            Vec::from("4567"),
-                        ),
-                        HpkeCiphertext::new(
-                            HpkeConfigId::from(12),
-                            Vec::from("01234"),
-                            Vec::from("567"),
-                        ),
-                    ]),
-                },
-                concat!(
-                    concat!(
-                        // partial_batch_selector
-                        "01", // query_type
-                    ),
-                    "0000000000000017", // report_count
-                    concat!(
-                        // interval
-                        "000000000000D431", // start
-                        "0000000000003039", // duration
-                    ),
-                    concat!(
-                        // encrypted_aggregate_shares
-                        "0000001E", // length
-                        concat!(
-                            "0A", // config_id
-                            concat!(
-                                // encapsulated_context
-                                "0004",     // length
-                                "30313233", // opaque data
-                            ),
-                            concat!(
-                                // payload
-                                "00000004", // length
-                                "34353637", // opaque data
-                            ),
-                        ),
-                        concat!(
-                            "0C", // config_id
-                            concat!(
-                                // encapsulated_context
-                                "0005",       // length
-                                "3031323334", // opaque data
-                            ),
-                            concat!(
-                                // payload
-                                "00000003", // length
-                                "353637",   // opaque data
-                            ),
-                        )
-                    )
-                ),
-            ),
-        ]);
-
-        // FixedSize.
         roundtrip_encoding(&[
             (
                 Collection {
@@ -3825,107 +3573,6 @@ mod tests {
 
     #[test]
     fn roundtrip_aggregation_job_initialize_req() {
-        // TimeInterval.
-        roundtrip_encoding(&[(
-            AggregationJobInitializeReq {
-                aggregation_parameter: Vec::from("012345"),
-                partial_batch_selector: PartialBatchSelector::new_time_interval(),
-                report_shares: Vec::from([
-                    ReportShare {
-                        metadata: ReportMetadata::new(
-                            ReportId::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
-                            Time::from_seconds_since_epoch(54321),
-                        ),
-                        public_share: Vec::new(),
-                        encrypted_input_share: HpkeCiphertext::new(
-                            HpkeConfigId::from(42),
-                            Vec::from("012345"),
-                            Vec::from("543210"),
-                        ),
-                    },
-                    ReportShare {
-                        metadata: ReportMetadata::new(
-                            ReportId::from([16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]),
-                            Time::from_seconds_since_epoch(73542),
-                        ),
-                        public_share: Vec::from("0123"),
-                        encrypted_input_share: HpkeCiphertext::new(
-                            HpkeConfigId::from(13),
-                            Vec::from("abce"),
-                            Vec::from("abfd"),
-                        ),
-                    },
-                ]),
-            },
-            concat!(
-                concat!(
-                    // aggregation_parameter
-                    "00000006",     // length
-                    "303132333435", // opaque data
-                ),
-                concat!(
-                    // partial_batch_selector
-                    "01", // query_type
-                ),
-                concat!(
-                    // report_shares
-                    "0000005E", // length
-                    concat!(
-                        concat!(
-                            // metadata
-                            "0102030405060708090A0B0C0D0E0F10", // report_id
-                            "000000000000D431",                 // time
-                        ),
-                        concat!(
-                            // public_share
-                            "00000000", // length
-                            "",         // opaque data
-                        ),
-                        concat!(
-                            // encrypted_input_share
-                            "2A", // config_id
-                            concat!(
-                                // encapsulated_context
-                                "0006",         // length
-                                "303132333435", // opaque data
-                            ),
-                            concat!(
-                                // payload
-                                "00000006",     // length
-                                "353433323130", // opaque data
-                            ),
-                        ),
-                    ),
-                    concat!(
-                        concat!(
-                            // metadata
-                            "100F0E0D0C0B0A090807060504030201", // report_id
-                            "0000000000011F46",                 // time
-                        ),
-                        concat!(
-                            "00000004", // payload
-                            "30313233", // opaque data
-                        ),
-                        concat!(
-                            // encrypted_input_share
-                            "0D", // config_id
-                            concat!(
-                                // encapsulated_context
-                                "0004",     // length
-                                "61626365", // opaque data
-                            ),
-                            concat!(
-                                // payload
-                                "00000004", // length
-                                "61626664", // opaque data
-                            ),
-                        ),
-                    ),
-                ),
-            ),
-        )]);
-
-        // FixedSize.
         roundtrip_encoding(&[(
             AggregationJobInitializeReq::<FixedSize> {
                 aggregation_parameter: Vec::from("012345"),
@@ -4114,45 +3761,6 @@ mod tests {
 
     #[test]
     fn roundtrip_batch_selector() {
-        // TimeInterval.
-        roundtrip_encoding(&[
-            (
-                BatchSelector::<TimeInterval> {
-                    batch_identifier: Interval::new(
-                        Time::from_seconds_since_epoch(54321),
-                        Duration::from_seconds(12345),
-                    )
-                    .unwrap(),
-                },
-                concat!(
-                    "01", // query_type
-                    concat!(
-                        // batch_interval
-                        "000000000000D431", // start
-                        "0000000000003039", // duration
-                    ),
-                ),
-            ),
-            (
-                BatchSelector::<TimeInterval> {
-                    batch_identifier: Interval::new(
-                        Time::from_seconds_since_epoch(50821),
-                        Duration::from_seconds(84354),
-                    )
-                    .unwrap(),
-                },
-                concat!(
-                    "01", // query_type
-                    concat!(
-                        // batch_interval
-                        "000000000000C685", // start
-                        "0000000000014982", // duration
-                    ),
-                ),
-            ),
-        ]);
-
-        // FixedSize.
         roundtrip_encoding(&[
             (
                 BatchSelector::<FixedSize> {
@@ -4178,75 +3786,6 @@ mod tests {
 
     #[test]
     fn roundtrip_aggregate_share_req() {
-        // TimeInterval.
-        roundtrip_encoding(&[
-            (
-                AggregateShareReq::<TimeInterval> {
-                    batch_selector: BatchSelector {
-                        batch_identifier: Interval::new(
-                            Time::from_seconds_since_epoch(54321),
-                            Duration::from_seconds(12345),
-                        )
-                        .unwrap(),
-                    },
-                    aggregation_parameter: Vec::new(),
-                    report_count: 439,
-                    checksum: ReportIdChecksum::get_decoded(&[u8::MIN; 32]).unwrap(),
-                },
-                concat!(
-                    concat!(
-                        // batch_selector
-                        "01", // query_type
-                        concat!(
-                            // batch_interval
-                            "000000000000D431", // start
-                            "0000000000003039", // duration
-                        ),
-                    ),
-                    concat!(
-                        // aggregation_parameter
-                        "00000000", // length
-                        "",         // opaque data
-                    ),
-                    "00000000000001B7", // report_count
-                    "0000000000000000000000000000000000000000000000000000000000000000", // checksum
-                ),
-            ),
-            (
-                AggregateShareReq::<TimeInterval> {
-                    batch_selector: BatchSelector {
-                        batch_identifier: Interval::new(
-                            Time::from_seconds_since_epoch(50821),
-                            Duration::from_seconds(84354),
-                        )
-                        .unwrap(),
-                    },
-                    aggregation_parameter: Vec::from("012345"),
-                    report_count: 8725,
-                    checksum: ReportIdChecksum::get_decoded(&[u8::MAX; 32]).unwrap(),
-                },
-                concat!(
-                    concat!(
-                        // batch_selector
-                        "01", // query_type
-                        concat!(
-                            // batch_interval
-                            "000000000000C685", // start
-                            "0000000000014982", // duration
-                        ),
-                    ),
-                    concat!(
-                        // aggregation_parameter
-                        "00000006",     // length
-                        "303132333435", // opaque data
-                    ),
-                    "0000000000002215", // report_count
-                    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", // checksum
-                ),
-            ),
-        ]);
-
-        // FixedSize.
         roundtrip_encoding(&[
             (
                 AggregateShareReq::<FixedSize> {
@@ -4379,33 +3918,6 @@ mod tests {
 
     #[test]
     fn roundtrip_aggregate_share_aad() {
-        // TimeInterval.
-        roundtrip_encoding(&[(
-            AggregateShareAad::<TimeInterval> {
-                task_id: TaskId::from([12u8; 32]),
-                batch_selector: BatchSelector {
-                    batch_identifier: Interval::new(
-                        Time::from_seconds_since_epoch(54321),
-                        Duration::from_seconds(12345),
-                    )
-                    .unwrap(),
-                },
-            },
-            concat!(
-                "0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C", // task_id
-                concat!(
-                    // batch_selector
-                    "01", // query_type
-                    concat!(
-                        // batch_interval
-                        "000000000000D431", // start
-                        "0000000000003039", // duration
-                    ),
-                ),
-            ),
-        )]);
-
-        // FixedSize.
         roundtrip_encoding(&[(
             AggregateShareAad::<FixedSize> {
                 task_id: TaskId::from([u8::MIN; 32]),

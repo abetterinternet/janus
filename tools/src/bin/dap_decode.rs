@@ -1,9 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use janus_messages::{
-    query_type::{FixedSize, TimeInterval},
-    AggregateShare, AggregateShareReq, AggregationJobContinueReq, AggregationJobInitializeReq,
-    AggregationJobResp, Collection, CollectionReq, HpkeConfig, HpkeConfigList, Report,
+    query_type::FixedSize, AggregateShare, AggregateShareReq, AggregationJobContinueReq,
+    AggregationJobInitializeReq, AggregationJobResp, Collection, CollectionReq, HpkeConfig,
+    HpkeConfigList, Report,
 };
 use prio::codec::Decode;
 use std::{
@@ -47,16 +47,9 @@ fn decode_dap_message(message_file: &str, media_type: &MediaType) -> Result<Box<
             Box::new(message)
         }
         MediaType::AggregationJobInitializeReq => {
-            if let Ok(decoded) =
-                AggregationJobInitializeReq::<TimeInterval>::get_decoded(&message_buf)
-            {
-                let message: AggregationJobInitializeReq<TimeInterval> = decoded;
-                Box::new(message)
-            } else {
-                let message: AggregationJobInitializeReq<FixedSize> =
-                    AggregationJobInitializeReq::<FixedSize>::get_decoded(&message_buf)?;
-                Box::new(message)
-            }
+            let message: AggregationJobInitializeReq<FixedSize> =
+                AggregationJobInitializeReq::<FixedSize>::get_decoded(&message_buf)?;
+            Box::new(message)
         }
         MediaType::AggregationJobContinueReq => {
             let message: AggregationJobContinueReq =
@@ -68,38 +61,23 @@ fn decode_dap_message(message_file: &str, media_type: &MediaType) -> Result<Box<
             Box::new(message)
         }
         MediaType::AggregateShareReq => {
-            if let Ok(decoded) = AggregateShareReq::<TimeInterval>::get_decoded(&message_buf) {
-                let message: AggregateShareReq<TimeInterval> = decoded;
-                Box::new(message)
-            } else {
-                let message: AggregateShareReq<FixedSize> =
-                    AggregateShareReq::<FixedSize>::get_decoded(&message_buf)?;
-                Box::new(message)
-            }
+            let message: AggregateShareReq<FixedSize> =
+                AggregateShareReq::<FixedSize>::get_decoded(&message_buf)?;
+            Box::new(message)
         }
         MediaType::AggregateShare => {
             let message: AggregateShare = AggregateShare::get_decoded(&message_buf)?;
             Box::new(message)
         }
         MediaType::CollectionReq => {
-            if let Ok(decoded) = CollectionReq::<TimeInterval>::get_decoded(&message_buf) {
-                let message: CollectionReq<TimeInterval> = decoded;
-                Box::new(message)
-            } else {
-                let message: CollectionReq<FixedSize> =
-                    CollectionReq::<FixedSize>::get_decoded(&message_buf)?;
-                Box::new(message)
-            }
+            let message: CollectionReq<FixedSize> =
+                CollectionReq::<FixedSize>::get_decoded(&message_buf)?;
+            Box::new(message)
         }
         MediaType::Collection => {
-            if let Ok(decoded) = Collection::<TimeInterval>::get_decoded(&message_buf) {
-                let message: Collection<TimeInterval> = decoded;
-                Box::new(message)
-            } else {
-                let message: Collection<FixedSize> =
-                    Collection::<FixedSize>::get_decoded(&message_buf)?;
-                Box::new(message)
-            }
+            let message: Collection<FixedSize> =
+                Collection::<FixedSize>::get_decoded(&message_buf)?;
+            Box::new(message)
         }
     };
 
