@@ -10,11 +10,11 @@ use serde_json::json;
 use testcontainers::{clients::Cli, GenericImage, RunnableImage};
 use url::Url;
 
-const DAPHNE_HELPER_IMAGE_NAME_AND_TAG: &str = "cloudflare/daphne-worker-helper:sha-f6b3ef1";
+const DAPHNE_HELPER_IMAGE_NAME_AND_TAG: &str = "cloudflare/daphne-worker-helper:sha-4c612db";
 
 /// Represents a running Daphne test instance.
 pub struct Daphne<'a> {
-    daphne_container: Option<ContainerLogsDropGuard<'a, GenericImage>>,
+    daphne_container: ContainerLogsDropGuard<'a, GenericImage>,
 }
 
 impl<'a> Daphne<'a> {
@@ -28,7 +28,6 @@ impl<'a> Daphne<'a> {
         network: &str,
         task: &Task,
         role: Role,
-        start_container: bool,
     ) -> Daphne<'a> {
         let (endpoint, image_name_and_tag) = match role {
             Role::Leader => panic!("A leader container image for Daphne is not yet available"),
@@ -43,22 +42,17 @@ impl<'a> Daphne<'a> {
             .unwrap_or((image_name_and_tag, "latest"));
 
         // Start the Daphne test container running.
-        let (port, daphne_container) = if start_container {
-            let runnable_image = RunnableImage::from(GenericImage::new(image_name, image_tag))
-                .with_network(network)
-                // Daphne uses the DAP_TRACING environment variable for its tracing subscriber.
-                .with_env_var(("DAP_TRACING", get_rust_log_level().1))
-                .with_container_name(endpoint.host_str().unwrap());
-            let daphne_container = ContainerLogsDropGuard::new(
-                test_name,
-                container_client.run(runnable_image),
-                ContainerLogsSource::Path("/logs".into()),
-            );
-            let port = daphne_container.get_host_port_ipv4(Self::INTERNAL_SERVING_PORT);
-            (port, Some(daphne_container))
-        } else {
-            (Self::INTERNAL_SERVING_PORT, None)
-        };
+        let runnable_image = RunnableImage::from(GenericImage::new(image_name, image_tag))
+            .with_network(network)
+            // Daphne uses the DAP_TRACING environment variable for its tracing subscriber.
+            .with_env_var(("DAP_TRACING", get_rust_log_level().1))
+            .with_container_name(endpoint.host_str().unwrap());
+        let daphne_container = ContainerLogsDropGuard::new(
+            test_name,
+            container_client.run(runnable_image),
+            ContainerLogsSource::Path("/logs".into()),
+        );
+        let port = daphne_container.get_host_port_ipv4(Self::INTERNAL_SERVING_PORT);
 
         // Wait for Daphne container to begin listening on the port.
         await_ready_ok(port).await;
@@ -129,9 +123,6 @@ impl<'a> Daphne<'a> {
     /// Returns the port of the aggregator on the host.
     pub fn port(&self) -> u16 {
         self.daphne_container
-            .as_ref()
-            .map_or(Self::INTERNAL_SERVING_PORT, |container| {
-                container.get_host_port_ipv4(Self::INTERNAL_SERVING_PORT)
-            })
+            .get_host_port_ipv4(Self::INTERNAL_SERVING_PORT)
     }
 }

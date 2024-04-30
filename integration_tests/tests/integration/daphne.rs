@@ -48,15 +48,7 @@ async fn daphne_janus() {
         .build();
 
     let container_client = container_client();
-    let leader = Daphne::new(
-        TEST_NAME,
-        &container_client,
-        &network,
-        &task,
-        Role::Leader,
-        true,
-    )
-    .await;
+    let leader = Daphne::new(TEST_NAME, &container_client, &network, &task, Role::Leader).await;
     let helper =
         JanusContainer::new(TEST_NAME, &container_client, &network, &task, Role::Helper).await;
 
@@ -72,7 +64,6 @@ async fn daphne_janus() {
 
 // This test places Janus in the leader role & Daphne in the helper role.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Daphne does not currently support DAP-07 (issue #1669)"]
 #[cfg(feature = "testcontainer")]
 async fn janus_daphne() {
     static TEST_NAME: &str = "janus_daphne";
@@ -102,15 +93,7 @@ async fn janus_daphne() {
     let container_client = container_client();
     let leader =
         JanusContainer::new(TEST_NAME, &container_client, &network, &task, Role::Leader).await;
-    let helper = Daphne::new(
-        TEST_NAME,
-        &container_client,
-        &network,
-        &task,
-        Role::Helper,
-        true,
-    )
-    .await;
+    let helper = Daphne::new(TEST_NAME, &container_client, &network, &task, Role::Helper).await;
 
     // Run the behavioral test.
     submit_measurements_and_verify_aggregate(
@@ -125,7 +108,6 @@ async fn janus_daphne() {
 /// This test places Janus in the leader role and Daphne in the helper role. Janus is run
 /// in-process, while Daphne is run in Docker.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Daphne does not currently support DAP-07 (issue #1669)"]
 async fn janus_in_process_daphne() {
     static TEST_NAME: &str = "janus_in_process_daphne";
     install_test_trace_subscriber();
@@ -153,7 +135,6 @@ async fn janus_in_process_daphne() {
         &network,
         &task_builder.clone().build(),
         Role::Helper,
-        true,
     )
     .await;
     task_builder = task_builder.with_helper_aggregator_endpoint(
