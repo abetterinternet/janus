@@ -2449,8 +2449,9 @@ impl AggregationJobContinueReq {
         self.step
     }
 
-    /// Gets the prepare steps associated with this aggregate continuation response.
-    pub fn prepare_steps(&self) -> &[PrepareContinue] {
+    /// Gets the preparation continuation messages associated with this aggregate continuation
+    /// request.
+    pub fn prepare_continues(&self) -> &[PrepareContinue] {
         &self.prepare_continues
     }
 }

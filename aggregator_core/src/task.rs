@@ -1,6 +1,7 @@
 //! Shared parameters for a DAP task.
 
 use crate::SecretBytes;
+use anyhow::anyhow;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use educe::Educe;
 use janus_core::{
@@ -11,9 +12,10 @@ use janus_core::{
 use janus_messages::{
     batch_mode, AggregationJobId, AggregationJobStep, Duration, HpkeConfig, Role, TaskId, Time,
 };
+use postgres_types::{FromSql, ToSql};
 use rand::{distributions::Standard, random, thread_rng, Rng};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
-use std::array::TryFromSliceError;
+use std::{array::TryFromSliceError, str::FromStr};
 use url::Url;
 
 /// Errors that methods and functions in this module may return.
@@ -267,7 +269,7 @@ impl AggregatorTask {
         {
             if matches!(
                 aggregator_parameters,
-                AggregatorTaskParameters::TaskprovHelper
+                AggregatorTaskParameters::TaskprovHelper { .. },
             ) {
                 return Err(Error::InvalidParameter(
                     "batch_time_window_size is not supported for taskprov",
@@ -295,6 +297,11 @@ impl AggregatorTask {
     /// Retrieves the DAP role played by this aggregator.
     pub fn role(&self) -> &Role {
         self.aggregator_parameters.role()
+    }
+
+    /// Retrieves the aggregation mode of the task for the Helper, or None for the Leader.
+    pub fn aggregation_mode(&self) -> Option<&AggregationMode> {
+        self.aggregator_parameters().aggregation_mode()
     }
 
     /// Retrieves the peer aggregator endpoint associated with this task.
@@ -493,6 +500,7 @@ pub enum AggregatorTaskParameters {
         /// HPKE configuration for the collector.
         collector_hpke_config: HpkeConfig,
     },
+
     /// Task parameters held exclusively by the DAP helper.
     Helper {
         /// Authentication token hash used to validate requests from the leader during the
@@ -500,10 +508,39 @@ pub enum AggregatorTaskParameters {
         aggregator_auth_token_hash: AuthenticationTokenHash,
         /// HPKE configuration for the collector.
         collector_hpke_config: HpkeConfig,
+        /// The aggregation mode to use for this task.
+        aggregation_mode: AggregationMode,
     },
-    /// Task parameters held exclusively by a DAP helper provisioned via taskprov. Currently there
-    /// are no such parameters.
-    TaskprovHelper,
+
+    /// Task parameters held exclusively by a DAP helper provisioned via taskprov.
+    TaskprovHelper { aggregation_mode: AggregationMode },
+}
+
+/// Indicates an aggregation mode: synchronous or asynchronous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSql, FromSql)]
+#[postgres(name = "aggregation_mode")]
+pub enum AggregationMode {
+    /// Aggregation is completed synchronously, i.e. every successful aggregation initialization or
+    /// continuation request will be responded to with a response in the "finished" status.
+    #[postgres(name = "SYNCHRONOUS")]
+    Synchronous,
+
+    /// Aggregation is completed asynchronously, i.e. every successful aggregation initialization or
+    /// continuation request will be responded to with a response in the "processing" status.
+    #[postgres(name = "ASYNCHRONOUS")]
+    Asynchronous,
+}
+
+impl FromStr for AggregationMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "synchronous" => Ok(Self::Synchronous),
+            "asynchronous" => Ok(Self::Asynchronous),
+            _ => Err(anyhow!("couldn't parse AggregationMode value: {s}")),
+        }
+    }
 }
 
 impl AggregatorTaskParameters {
@@ -511,7 +548,20 @@ impl AggregatorTaskParameters {
     pub fn role(&self) -> &Role {
         match self {
             Self::Leader { .. } => &Role::Leader,
-            Self::Helper { .. } | Self::TaskprovHelper => &Role::Helper,
+            Self::Helper { .. } | Self::TaskprovHelper { .. } => &Role::Helper,
+        }
+    }
+
+    /// Returns the [`AggregationMode`] for this task for the helper, or `None` for the leader.
+    fn aggregation_mode(&self) -> Option<&AggregationMode> {
+        match self {
+            Self::Leader { .. } => None,
+            Self::Helper {
+                aggregation_mode, ..
+            } => Some(aggregation_mode),
+            Self::TaskprovHelper {
+                aggregation_mode, ..
+            } => Some(aggregation_mode),
         }
     }
 
@@ -576,6 +626,7 @@ pub struct SerializedAggregatorTask {
     task_id: Option<TaskId>,
     peer_aggregator_endpoint: Url,
     batch_mode: BatchMode,
+    aggregation_mode: Option<AggregationMode>,
     vdaf: VdafInstance,
     role: Role,
     vdaf_verify_key: Option<String>, // in unpadded base64url
@@ -633,6 +684,7 @@ impl Serialize for AggregatorTask {
             task_id: Some(*self.id()),
             peer_aggregator_endpoint: self.peer_aggregator_endpoint().clone(),
             batch_mode: *self.batch_mode(),
+            aggregation_mode: self.aggregator_parameters.aggregation_mode().copied(),
             vdaf: self.vdaf().clone(),
             role: *self.role(),
             vdaf_verify_key: Some(URL_SAFE_NO_PAD.encode(self.opaque_vdaf_verify_key())),
@@ -690,6 +742,9 @@ impl TryFrom<SerializedAggregatorTask> for AggregatorTask {
                     Error::InvalidParameter("missing aggregator auth token hash"),
                 )?,
                 collector_hpke_config: serialized_task.collector_hpke_config,
+                aggregation_mode: serialized_task
+                    .aggregation_mode
+                    .ok_or(Error::InvalidParameter("missing aggregation mode"))?,
             },
             _ => return Err(Error::InvalidParameter("unexpected role")),
         };
@@ -724,8 +779,8 @@ impl<'de> Deserialize<'de> for AggregatorTask {
 pub mod test_util {
     use crate::{
         task::{
-            AggregatorTask, AggregatorTaskParameters, BatchMode, CommonTaskParameters, Error,
-            VerifyKey,
+            AggregationMode, AggregatorTask, AggregatorTaskParameters, BatchMode,
+            CommonTaskParameters, Error, VerifyKey,
         },
         SecretBytes,
     };
@@ -738,7 +793,8 @@ pub mod test_util {
         vdaf::VdafInstance,
     };
     use janus_messages::{
-        AggregationJobId, CollectionJobId, Duration, HpkeConfigId, Role, TaskId, Time,
+        AggregationJobId, AggregationJobStep, CollectionJobId, Duration, HpkeConfigId, Role,
+        TaskId, Time,
     };
     use rand::{distributions::Standard, random, thread_rng, Rng};
     use std::collections::HashMap;
@@ -756,6 +812,8 @@ pub mod test_util {
         /// URL relative to which the leader aggregator's API endpoints are found.
         #[educe(Debug(method(std::fmt::Display::fmt)))]
         helper_aggregator_endpoint: Url,
+        /// The mode used for aggregation by the Helper (synchronous vs asynchronous).
+        helper_aggregation_mode: AggregationMode,
         /// HPKE configuration and private key used by the collector to decrypt aggregate shares.
         collector_hpke_keypair: HpkeKeypair,
         /// Token used to authenticate messages exchanged between the aggregators in the aggregation
@@ -778,6 +836,7 @@ pub mod test_util {
             leader_aggregator_endpoint: Url,
             helper_aggregator_endpoint: Url,
             batch_mode: BatchMode,
+            helper_aggregation_mode: AggregationMode,
             vdaf: VdafInstance,
             vdaf_verify_key: SecretBytes,
             task_start: Option<Time>,
@@ -822,6 +881,7 @@ pub mod test_util {
                 // persnickety about the slash at the end of the path.
                 leader_aggregator_endpoint: url_ensure_trailing_slash(leader_aggregator_endpoint),
                 helper_aggregator_endpoint: url_ensure_trailing_slash(helper_aggregator_endpoint),
+                helper_aggregation_mode,
                 aggregator_auth_token,
                 collector_auth_token,
                 collector_hpke_keypair,
@@ -848,6 +908,10 @@ pub mod test_util {
         /// Retrieves the batch mode associated with this task.
         pub fn batch_mode(&self) -> &BatchMode {
             &self.common_parameters.batch_mode
+        }
+
+        pub fn helper_aggregation_mode(&self) -> &AggregationMode {
+            &self.helper_aggregation_mode
         }
 
         /// Retrieves the VDAF associated with this task.
@@ -935,11 +999,19 @@ pub mod test_util {
         pub fn aggregation_job_uri(
             &self,
             aggregation_job_id: &AggregationJobId,
+            step: Option<AggregationJobStep>,
         ) -> Result<Url, Error> {
-            Ok(self.helper_aggregator_endpoint().join(&format!(
+            let mut uri = self.helper_aggregator_endpoint().join(&format!(
                 "{}/aggregation_jobs/{aggregation_job_id}",
                 self.tasks_path()
-            ))?)
+            ))?;
+
+            if let Some(step) = step {
+                uri.query_pairs_mut()
+                    .append_pair("step", &u16::from(step).to_string());
+            }
+
+            Ok(uri)
         }
 
         /// Returns the URI at which the helper aggregate shares resource can be accessed.
@@ -986,6 +1058,7 @@ pub mod test_util {
                         &self.aggregator_auth_token,
                     ),
                     collector_hpke_config: self.collector_hpke_keypair.config().clone(),
+                    aggregation_mode: self.helper_aggregation_mode,
                 },
             )
         }
@@ -995,7 +1068,9 @@ pub mod test_util {
             AggregatorTask::new_with_common_parameters(
                 self.common_parameters.clone(),
                 self.leader_aggregator_endpoint.clone(),
-                AggregatorTaskParameters::TaskprovHelper,
+                AggregatorTaskParameters::TaskprovHelper {
+                    aggregation_mode: self.helper_aggregation_mode,
+                },
             )
         }
 
@@ -1021,7 +1096,11 @@ pub mod test_util {
         /// Create a [`TaskBuilder`] from the provided values, with arbitrary values for the other
         /// task parameters. Defaults to using `AuthenticationToken::Bearer` for the aggregator and
         /// collector authentication tokens.
-        pub fn new(batch_mode: BatchMode, vdaf: VdafInstance) -> Self {
+        pub fn new(
+            batch_mode: BatchMode,
+            helper_aggregation_mode: AggregationMode,
+            vdaf: VdafInstance,
+        ) -> Self {
             let task_id = random();
 
             let leader_hpke_keypairs = [
@@ -1045,6 +1124,7 @@ pub mod test_util {
                 "https://leader.endpoint".parse().unwrap(),
                 "https://helper.endpoint".parse().unwrap(),
                 batch_mode,
+                helper_aggregation_mode,
                 vdaf,
                 vdaf_verify_key,
                 None,
@@ -1087,9 +1167,14 @@ pub mod test_util {
             })
         }
 
-        /// Gets the batch mode for the eventual task
+        /// Gets the batch mode for the eventual task.
         pub fn batch_mode(&self) -> &BatchMode {
             self.0.batch_mode()
+        }
+
+        /// Gets the aggregation mode used by the helper for the eventual task.
+        pub fn helper_aggregation_mode(&self) -> &AggregationMode {
+            self.0.helper_aggregation_mode()
         }
 
         /// Gets the VDAF for the eventual task
@@ -1270,8 +1355,8 @@ pub mod test_util {
 mod tests {
     use crate::{
         task::{
-            test_util::TaskBuilder, AggregatorTask, AggregatorTaskParameters, BatchMode,
-            VdafInstance,
+            test_util::TaskBuilder, AggregationMode, AggregatorTask, AggregatorTaskParameters,
+            BatchMode, VdafInstance,
         },
         SecretBytes,
     };
@@ -1293,20 +1378,28 @@ mod tests {
     #[test]
     fn leader_task_serialization() {
         roundtrip_encoding(
-            TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-                .build()
-                .leader_view()
-                .unwrap(),
+            TaskBuilder::new(
+                BatchMode::TimeInterval,
+                AggregationMode::Synchronous,
+                VdafInstance::Prio3Count,
+            )
+            .build()
+            .leader_view()
+            .unwrap(),
         );
     }
 
     #[test]
     fn helper_task_serialization() {
         roundtrip_encoding(
-            TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-                .build()
-                .helper_view()
-                .unwrap(),
+            TaskBuilder::new(
+                BatchMode::TimeInterval,
+                AggregationMode::Synchronous,
+                VdafInstance::Prio3Count,
+            )
+            .build()
+            .helper_view()
+            .unwrap(),
         );
     }
 
@@ -1318,10 +1411,14 @@ mod tests {
 
     #[test]
     fn aggregator_endpoints_end_in_slash() {
-        let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-            .with_leader_aggregator_endpoint("http://leader_endpoint/foo/bar".parse().unwrap())
-            .with_helper_aggregator_endpoint("http://helper_endpoint".parse().unwrap())
-            .build();
+        let task = TaskBuilder::new(
+            BatchMode::TimeInterval,
+            AggregationMode::Synchronous,
+            VdafInstance::Prio3Count,
+        )
+        .with_leader_aggregator_endpoint("http://leader_endpoint/foo/bar".parse().unwrap())
+        .with_helper_aggregator_endpoint("http://helper_endpoint".parse().unwrap())
+        .build();
 
         assert_eq!(
             task.leader_aggregator_endpoint(),
@@ -1338,21 +1435,30 @@ mod tests {
         for (prefix, task) in [
             (
                 "",
-                TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count).build(),
+                TaskBuilder::new(
+                    BatchMode::TimeInterval,
+                    AggregationMode::Synchronous,
+                    VdafInstance::Prio3Count,
+                )
+                .build(),
             ),
             (
                 "/prefix",
-                TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-                    .with_leader_aggregator_endpoint("https://leader.com/prefix/".parse().unwrap())
-                    .with_helper_aggregator_endpoint("https://helper.com/prefix/".parse().unwrap())
-                    .build(),
+                TaskBuilder::new(
+                    BatchMode::TimeInterval,
+                    AggregationMode::Synchronous,
+                    VdafInstance::Prio3Count,
+                )
+                .with_leader_aggregator_endpoint("https://leader.com/prefix/".parse().unwrap())
+                .with_helper_aggregator_endpoint("https://helper.com/prefix/".parse().unwrap())
+                .build(),
             ),
         ] {
             let prefix = format!("{prefix}/tasks");
 
             for uri in [
                 task.report_upload_uri().unwrap(),
-                task.aggregation_job_uri(&random()).unwrap(),
+                task.aggregation_job_uri(&random(), None).unwrap(),
                 task.collection_job_uri(&random()).unwrap(),
                 task.aggregate_shares_uri().unwrap(),
             ] {
@@ -1369,7 +1475,12 @@ mod tests {
 
     #[test]
     fn request_authentication() {
-        let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count).build();
+        let task = TaskBuilder::new(
+            BatchMode::TimeInterval,
+            AggregationMode::Synchronous,
+            VdafInstance::Prio3Count,
+        )
+        .build();
 
         let leader_task = task.leader_view().unwrap();
         let helper_task = task.helper_view().unwrap();
@@ -1432,7 +1543,7 @@ mod tests {
             &[
                 Token::Struct {
                     name: "SerializedAggregatorTask",
-                    len: 16,
+                    len: 17,
                 },
                 Token::Str("task_id"),
                 Token::Some,
@@ -1444,6 +1555,8 @@ mod tests {
                     name: "BatchMode",
                     variant: "TimeInterval",
                 },
+                Token::Str("aggregation_mode"),
+                Token::None,
                 Token::Str("vdaf"),
                 Token::UnitVariant {
                     name: "VdafInstance",
@@ -1567,13 +1680,14 @@ mod tests {
                         HpkeAeadId::Aes128Gcm,
                         HpkePublicKey::from(b"collector hpke public key".to_vec()),
                     ),
+                    aggregation_mode: AggregationMode::Synchronous,
                 },
             )
             .unwrap(),
             &[
                 Token::Struct {
                     name: "SerializedAggregatorTask",
-                    len: 16,
+                    len: 17,
                 },
                 Token::Str("task_id"),
                 Token::Some,
@@ -1589,6 +1703,12 @@ mod tests {
                 Token::Str("batch_time_window_size"),
                 Token::None,
                 Token::StructVariantEnd,
+                Token::Str("aggregation_mode"),
+                Token::Some,
+                Token::UnitVariant {
+                    name: "AggregationMode",
+                    variant: "Synchronous",
+                },
                 Token::Str("vdaf"),
                 Token::StructVariant {
                     name: "VdafInstance",

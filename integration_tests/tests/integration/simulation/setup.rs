@@ -1,9 +1,9 @@
-use std::{
-    net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
-    time::Duration as StdDuration,
+use crate::simulation::{
+    http_request_exponential_backoff,
+    model::Input,
+    proxy::{FaultInjector, FaultInjectorHandler, InspectHandler, InspectMonitor},
+    run::State,
 };
-
 use backoff::ExponentialBackoffBuilder;
 use futures::future::BoxFuture;
 use janus_aggregator::{
@@ -30,21 +30,19 @@ use janus_aggregator_core::{
     },
     task::{
         test_util::{Task, TaskBuilder},
-        BatchMode,
+        AggregationMode, BatchMode,
     },
 };
 use janus_client::{default_http_client, Client};
 use janus_collector::Collector;
 use janus_core::{test_util::runtime::TestRuntime, time::MockClock, Runtime};
 use prio::vdaf::prio3::Prio3Histogram;
-use tokio::net::TcpListener;
-
-use crate::simulation::{
-    http_request_exponential_backoff,
-    model::Input,
-    proxy::{FaultInjector, FaultInjectorHandler, InspectHandler, InspectMonitor},
-    run::State,
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Duration as StdDuration,
 };
+use tokio::net::TcpListener;
 
 // Labels for TestRuntimeManager.
 static LEADER_AGGREGATOR_REPORT_WRITER: &str = "leader_aggregator_report_writer";
@@ -54,6 +52,8 @@ static HELPER_AGGREGATOR_SERVER: &str = "helper_aggregator_server";
 
 const BATCH_AGGREGATION_SHARD_COUNT: usize = 32;
 const TASK_COUNTER_SHARD_COUNT: u64 = 128;
+const HPKE_CONFIGS_REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(60);
+const DEFAULT_ASYNC_POLL_INTERVAL: StdDuration = StdDuration::from_secs(1);
 
 pub(super) struct SimulationAggregator {
     pub(super) _ephemeral_datastore: EphemeralDatastore,
@@ -173,21 +173,25 @@ impl Components {
         } else {
             BatchMode::TimeInterval
         };
-        let task = TaskBuilder::new(batch_mode, state.vdaf_instance.clone())
-            .with_leader_aggregator_endpoint(
-                format!("http://{}/", leader.socket_address)
-                    .parse()
-                    .unwrap(),
-            )
-            .with_helper_aggregator_endpoint(
-                format!("http://{}/", helper.socket_address)
-                    .parse()
-                    .unwrap(),
-            )
-            .with_time_precision(input.config.time_precision)
-            .with_min_batch_size(input.config.min_batch_size)
-            .with_report_expiry_age(input.config.report_expiry_age)
-            .build();
+        let task = TaskBuilder::new(
+            batch_mode,
+            AggregationMode::Synchronous,
+            state.vdaf_instance.clone(),
+        )
+        .with_leader_aggregator_endpoint(
+            format!("http://{}/", leader.socket_address)
+                .parse()
+                .unwrap(),
+        )
+        .with_helper_aggregator_endpoint(
+            format!("http://{}/", helper.socket_address)
+                .parse()
+                .unwrap(),
+        )
+        .with_time_precision(input.config.time_precision)
+        .with_min_batch_size(input.config.min_batch_size)
+        .with_report_expiry_age(input.config.report_expiry_age)
+        .build();
         let leader_task = task.leader_view().unwrap();
         let helper_task = task.helper_view().unwrap();
         leader
@@ -255,6 +259,8 @@ impl Components {
             &state.meter,
             BATCH_AGGREGATION_SHARD_COUNT.try_into().unwrap(),
             TASK_COUNTER_SHARD_COUNT,
+            HPKE_CONFIGS_REFRESH_INTERVAL,
+            DEFAULT_ASYNC_POLL_INTERVAL,
         ));
         let aggregation_job_driver_acquirer_cb = Box::new(
             aggregation_job_driver.make_incomplete_job_acquirer_callback(

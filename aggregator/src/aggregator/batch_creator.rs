@@ -369,7 +369,7 @@ where
             (),
             batch_id,
             client_timestamp_interval,
-            AggregationJobState::InProgress,
+            AggregationJobState::Active,
             AggregationJobStep::from(0),
         );
         aggregation_job_writer.put(aggregation_job, report_aggregations)?;

@@ -5,7 +5,7 @@ use crate::{
     },
     initialize_rustls,
 };
-use janus_aggregator_core::task::{test_util::TaskBuilder, BatchMode};
+use janus_aggregator_core::task::{test_util::TaskBuilder, AggregationMode, BatchMode};
 use janus_core::{
     test_util::install_test_trace_subscriber,
     vdaf::{vdaf_dp_strategies, VdafInstance},
@@ -44,11 +44,12 @@ impl JanusContainerPair {
     /// the given VDAF and batch mode.
     pub async fn new(
         test_name: &str,
-        vdaf: VdafInstance,
         batch_mode: BatchMode,
+        aggregation_mode: AggregationMode,
+        vdaf: VdafInstance,
     ) -> JanusContainerPair {
         let (task_parameters, task_builder) = build_test_task(
-            TaskBuilder::new(batch_mode, vdaf),
+            TaskBuilder::new(batch_mode, aggregation_mode, vdaf),
             TestContext::VirtualNetwork,
             Duration::from_millis(500),
             Duration::from_secs(60),
@@ -106,21 +107,45 @@ impl JanusInProcessPair {
     }
 }
 
-/// This test exercises Prio3Count with Janus as both the leader and the helper.
-#[tokio::test(flavor = "multi_thread")]
 #[cfg(feature = "testcontainer")]
-async fn janus_janus_count() {
-    static TEST_NAME: &str = "janus_janus_count";
+async fn run_container_test(
+    test_name: &str,
+    batch_mode: BatchMode,
+    aggregation_mode: AggregationMode,
+    vdaf: VdafInstance,
+) {
+    install_test_trace_subscriber();
+    initialize_rustls();
+
+    // Start servers.
+    let janus_pair = JanusContainerPair::new(test_name, batch_mode, aggregation_mode, vdaf).await;
+
+    // Run the behavioral test.
+    submit_measurements_and_verify_aggregate(
+        test_name,
+        &janus_pair.task_parameters,
+        (janus_pair.leader.port(), janus_pair.helper.port()),
+        &ClientBackend::InProcess,
+    )
+    .await;
+}
+
+async fn run_in_process_test(
+    test_name: &str,
+    batch_mode: BatchMode,
+    aggregation_mode: AggregationMode,
+    vdaf: VdafInstance,
+) {
     install_test_trace_subscriber();
     initialize_rustls();
 
     // Start servers.
     let janus_pair =
-        JanusContainerPair::new(TEST_NAME, VdafInstance::Prio3Count, BatchMode::TimeInterval).await;
+        JanusInProcessPair::new(TaskBuilder::new(batch_mode, aggregation_mode, vdaf)).await;
 
     // Run the behavioral test.
     submit_measurements_and_verify_aggregate(
-        TEST_NAME,
+        test_name,
         &janus_pair.task_parameters,
         (janus_pair.leader.port(), janus_pair.helper.port()),
         &ClientBackend::InProcess,
@@ -128,245 +153,326 @@ async fn janus_janus_count() {
     .await;
 }
 
-/// This test exercises Prio3Count with Janus as both the leader and the helper.
-#[tokio::test(flavor = "multi_thread")]
-async fn janus_in_process_count() {
-    install_test_trace_subscriber();
-    initialize_rustls();
-
-    // Start servers.
-    let janus_pair = JanusInProcessPair::new(TaskBuilder::new(
-        BatchMode::TimeInterval,
-        VdafInstance::Prio3Count,
-    ))
-    .await;
-
-    // Run the behavioral test.
-    submit_measurements_and_verify_aggregate(
-        "janus_in_process_count",
-        &janus_pair.task_parameters,
-        (janus_pair.leader.port(), janus_pair.helper.port()),
-        &ClientBackend::InProcess,
-    )
-    .await;
-}
-
-/// This test exercises Prio3Sum with Janus as both the leader and the helper.
+/// This test exercises Prio3Count with Janus as both the leader and the helper, using synchronous
+/// aggregation.
 #[tokio::test(flavor = "multi_thread")]
 #[cfg(feature = "testcontainer")]
-async fn janus_janus_sum_16() {
-    static TEST_NAME: &str = "janus_janus_sum_16";
-    install_test_trace_subscriber();
-    initialize_rustls();
+async fn janus_janus_sync_count() {
+    run_container_test(
+        "janus_janus_sync_count",
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .await
+}
 
-    // Start servers.
-    let janus_pair = JanusContainerPair::new(
-        TEST_NAME,
+/// This test exercises Prio3Count with Janus as both the leader and the helper, using asynchronous
+/// aggregation.
+#[tokio::test(flavor = "multi_thread")]
+#[cfg(feature = "testcontainer")]
+async fn janus_janus_async_count() {
+    run_container_test(
+        "janus_janus_async_count",
+        BatchMode::TimeInterval,
+        AggregationMode::Asynchronous,
+        VdafInstance::Prio3Count,
+    )
+    .await
+}
+
+/// This test exercises Prio3Count with Janus as both the leader and the helper, using synchronous
+/// aggregation.
+#[tokio::test(flavor = "multi_thread")]
+async fn janus_in_process_sync_count() {
+    run_in_process_test(
+        "janus_in_process_sync_count",
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .await
+}
+
+/// This test exercises Prio3Count with Janus as both the leader and the helper, using asynchronous
+/// aggregation.
+#[tokio::test(flavor = "multi_thread")]
+async fn janus_in_process_async_count() {
+    run_in_process_test(
+        "janus_in_process_async_count",
+        BatchMode::TimeInterval,
+        AggregationMode::Asynchronous,
+        VdafInstance::Prio3Count,
+    )
+    .await
+}
+
+/// This test exercises Prio3Sum with Janus as both the leader and the helper, using synchronous
+/// aggregation.
+#[tokio::test(flavor = "multi_thread")]
+#[cfg(feature = "testcontainer")]
+async fn janus_janus_sync_sum_16() {
+    run_container_test(
+        "janus_janus_sync_sum_16",
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
         VdafInstance::Prio3Sum {
             max_measurement: 65535,
         },
-        BatchMode::TimeInterval,
     )
-    .await;
-
-    // Run the behavioral test.
-    submit_measurements_and_verify_aggregate(
-        TEST_NAME,
-        &janus_pair.task_parameters,
-        (janus_pair.leader.port(), janus_pair.helper.port()),
-        &ClientBackend::InProcess,
-    )
-    .await;
+    .await
 }
 
-/// This test exercises Prio3Sum with Janus as both the leader and the helper.
+/// This test exercises Prio3Sum with Janus as both the leader and the helper, using asynchronous
+/// aggregation.
 #[tokio::test(flavor = "multi_thread")]
-async fn janus_in_process_sum_16() {
-    install_test_trace_subscriber();
-    initialize_rustls();
-
-    // Start servers.
-    let janus_pair = JanusInProcessPair::new(TaskBuilder::new(
+#[cfg(feature = "testcontainer")]
+async fn janus_janus_async_sum_16() {
+    run_container_test(
+        "janus_janus_sync_sum_16",
         BatchMode::TimeInterval,
+        AggregationMode::Asynchronous,
+        VdafInstance::Prio3Sum {
+            max_measurement: 65535,
+        },
+    )
+    .await
+}
+
+/// This test exercises Prio3Sum with Janus as both the leader and the helper, using synchronous
+/// aggregation.
+#[tokio::test(flavor = "multi_thread")]
+async fn janus_in_process_sync_sum_16() {
+    run_in_process_test(
+        "janus_in_process_sync_sum_16",
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
         VdafInstance::Prio3Sum {
             max_measurement: 4096,
         },
-    ))
-    .await;
-
-    // Run the behavioral test.
-    submit_measurements_and_verify_aggregate(
-        "janus_in_process_sum_16",
-        &janus_pair.task_parameters,
-        (janus_pair.leader.port(), janus_pair.helper.port()),
-        &ClientBackend::InProcess,
     )
-    .await;
+    .await
 }
 
-/// This test exercises Prio3Histogram with Janus as both the leader and the helper.
+/// This test exercises Prio3Sum with Janus as both the leader and the helper, using asynchronous
+/// aggregation.
+#[tokio::test(flavor = "multi_thread")]
+async fn janus_in_process_async_sum_16() {
+    run_in_process_test(
+        "janus_in_process_sync_sum_16",
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Sum {
+            max_measurement: 4096,
+        },
+    )
+    .await
+}
+
+/// This test exercises Prio3Histogram with Janus as both the leader and the helper, using
+/// synchronous aggregation.
 #[tokio::test(flavor = "multi_thread")]
 #[cfg(feature = "testcontainer")]
-async fn janus_janus_histogram_4_buckets() {
-    static TEST_NAME: &str = "janus_janus_histogram_4_buckets";
-    install_test_trace_subscriber();
-    initialize_rustls();
-
-    // Start servers.
-    let janus_pair = JanusContainerPair::new(
-        TEST_NAME,
+async fn janus_janus_sync_histogram_4_buckets() {
+    run_container_test(
+        "janus_janus_sync_histogram_4_buckets",
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
         VdafInstance::Prio3Histogram {
             length: 4,
             chunk_length: 2,
             dp_strategy: vdaf_dp_strategies::Prio3Histogram::NoDifferentialPrivacy,
         },
-        BatchMode::TimeInterval,
     )
-    .await;
-
-    // Run the behavioral test.
-    submit_measurements_and_verify_aggregate(
-        TEST_NAME,
-        &janus_pair.task_parameters,
-        (janus_pair.leader.port(), janus_pair.helper.port()),
-        &ClientBackend::InProcess,
-    )
-    .await;
+    .await
 }
 
-/// This test exercises Prio3Histogram with Janus as both the leader and the helper.
+/// This test exercises Prio3Histogram with Janus as both the leader and the helper, using
+/// asynchronous aggregation.
 #[tokio::test(flavor = "multi_thread")]
-async fn janus_in_process_histogram_4_buckets() {
-    install_test_trace_subscriber();
-    initialize_rustls();
-
-    // Start servers.
-    let janus_pair = JanusInProcessPair::new(TaskBuilder::new(
+#[cfg(feature = "testcontainer")]
+async fn janus_janus_async_histogram_4_buckets() {
+    run_container_test(
+        "janus_janus_async_histogram_4_buckets",
         BatchMode::TimeInterval,
+        AggregationMode::Asynchronous,
         VdafInstance::Prio3Histogram {
             length: 4,
             chunk_length: 2,
             dp_strategy: vdaf_dp_strategies::Prio3Histogram::NoDifferentialPrivacy,
         },
-    ))
-    .await;
-
-    // Run the behavioral test.
-    submit_measurements_and_verify_aggregate(
-        "janus_in_process_histogram_4_buckets",
-        &janus_pair.task_parameters,
-        (janus_pair.leader.port(), janus_pair.helper.port()),
-        &ClientBackend::InProcess,
     )
-    .await;
+    .await
 }
 
-/// This test exercises the leader-selected batch mode with Janus as both the leader and the helper.
+/// This test exercises Prio3Histogram with Janus as both the leader and the helper, using
+/// synchronous aggregation.
+#[tokio::test(flavor = "multi_thread")]
+async fn janus_in_process_sync_histogram_4_buckets() {
+    run_in_process_test(
+        "janus_in_process_sync_histogram_4_buckets",
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Histogram {
+            length: 4,
+            chunk_length: 2,
+            dp_strategy: vdaf_dp_strategies::Prio3Histogram::NoDifferentialPrivacy,
+        },
+    )
+    .await
+}
+
+/// This test exercises Prio3Histogram with Janus as both the leader and the helper, using
+/// asynchronous aggregation.
+#[tokio::test(flavor = "multi_thread")]
+async fn janus_in_process_async_histogram_4_buckets() {
+    run_in_process_test(
+        "janus_in_process_sync_histogram_4_buckets",
+        BatchMode::TimeInterval,
+        AggregationMode::Asynchronous,
+        VdafInstance::Prio3Histogram {
+            length: 4,
+            chunk_length: 2,
+            dp_strategy: vdaf_dp_strategies::Prio3Histogram::NoDifferentialPrivacy,
+        },
+    )
+    .await
+}
+
+/// This test exercises the leader-selected batch mode with Janus as both the leader and the helper,
+/// using synchronous aggregation.
 #[tokio::test(flavor = "multi_thread")]
 #[cfg(feature = "testcontainer")]
-async fn janus_janus_leader_selected() {
-    static TEST_NAME: &str = "janus_janus_leader_selected";
-    install_test_trace_subscriber();
-    initialize_rustls();
-
-    // Start servers.
-    let janus_pair = JanusContainerPair::new(
-        TEST_NAME,
-        VdafInstance::Prio3Count,
+async fn janus_janus_leader_selected_sync() {
+    run_container_test(
+        "janus_janus_leader_selected_sync",
         BatchMode::LeaderSelected {
             batch_time_window_size: None,
         },
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
     )
-    .await;
-
-    // Run the behavioral test.
-    submit_measurements_and_verify_aggregate(
-        TEST_NAME,
-        &janus_pair.task_parameters,
-        (janus_pair.leader.port(), janus_pair.helper.port()),
-        &ClientBackend::InProcess,
-    )
-    .await;
+    .await
 }
 
-/// This test exercises the leader-selected batch mode with Janus as both the leader and the helper.
+/// This test exercises the leader-selected batch mode with Janus as both the leader and the helper,
+/// using asynchronous aggregation.
 #[tokio::test(flavor = "multi_thread")]
-async fn janus_in_process_leader_selected() {
-    install_test_trace_subscriber();
-    initialize_rustls();
-
-    // Start servers.
-    let janus_pair = JanusInProcessPair::new(TaskBuilder::new(
+#[cfg(feature = "testcontainer")]
+async fn janus_janus_leader_selected_async() {
+    run_container_test(
+        "janus_janus_leader_selected_async",
         BatchMode::LeaderSelected {
             batch_time_window_size: None,
         },
+        AggregationMode::Synchronous,
         VdafInstance::Prio3Count,
-    ))
-    .await;
-
-    // Run the behavioral test.
-    submit_measurements_and_verify_aggregate(
-        "janus_in_process_leader_selected",
-        &janus_pair.task_parameters,
-        (janus_pair.leader.port(), janus_pair.helper.port()),
-        &ClientBackend::InProcess,
     )
-    .await;
+    .await
 }
 
-/// This test exercises Prio3SumVec with Janus as both the leader and the helper.
+/// This test exercises the leader-selected batch mode with Janus as both the leader and the helper,
+/// using synchronous aggregation.
+#[tokio::test(flavor = "multi_thread")]
+async fn janus_in_process_leader_selected_sync() {
+    run_in_process_test(
+        "janus_in_process_leader_selected_sync",
+        BatchMode::LeaderSelected {
+            batch_time_window_size: None,
+        },
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .await
+}
+
+/// This test exercises the leader-selected batch mode with Janus as both the leader and the helper,
+/// using asynchronous aggregation.
+#[tokio::test(flavor = "multi_thread")]
+async fn janus_in_process_leader_selected_async() {
+    run_in_process_test(
+        "janus_in_process_leader_selected_sync",
+        BatchMode::LeaderSelected {
+            batch_time_window_size: None,
+        },
+        AggregationMode::Asynchronous,
+        VdafInstance::Prio3Count,
+    )
+    .await
+}
+
+/// This test exercises Prio3SumVec with Janus as both the leader and the helper, using synchronous
+/// aggregation.
 #[tokio::test(flavor = "multi_thread")]
 #[cfg(feature = "testcontainer")]
-async fn janus_janus_sum_vec() {
-    static TEST_NAME: &str = "janus_janus_sum_vec";
-    install_test_trace_subscriber();
-    initialize_rustls();
-
-    let janus_pair = JanusContainerPair::new(
-        TEST_NAME,
+async fn janus_janus_sync_sum_vec() {
+    run_container_test(
+        "janus_janus_sync_sum_vec",
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
         VdafInstance::Prio3SumVec {
             bits: 16,
             length: 15,
             chunk_length: 16,
             dp_strategy: vdaf_dp_strategies::Prio3SumVec::NoDifferentialPrivacy,
         },
-        BatchMode::TimeInterval,
     )
-    .await;
-
-    submit_measurements_and_verify_aggregate(
-        TEST_NAME,
-        &janus_pair.task_parameters,
-        (janus_pair.leader.port(), janus_pair.helper.port()),
-        &ClientBackend::InProcess,
-    )
-    .await;
+    .await
 }
 
-/// This test exercises Prio3SumVec with Janus as both the leader and the helper.
+/// This test exercises Prio3SumVec with Janus as both the leader and the helper, using asynchronous
+/// aggregation.
 #[tokio::test(flavor = "multi_thread")]
-async fn janus_in_process_sum_vec() {
-    install_test_trace_subscriber();
-    initialize_rustls();
-
-    let janus_pair = JanusInProcessPair::new(TaskBuilder::new(
+#[cfg(feature = "testcontainer")]
+async fn janus_janus_async_sum_vec() {
+    run_container_test(
+        "janus_janus_sync_sum_vec",
         BatchMode::TimeInterval,
+        AggregationMode::Asynchronous,
         VdafInstance::Prio3SumVec {
             bits: 16,
             length: 15,
             chunk_length: 16,
             dp_strategy: vdaf_dp_strategies::Prio3SumVec::NoDifferentialPrivacy,
         },
-    ))
-    .await;
-
-    submit_measurements_and_verify_aggregate(
-        "janus_in_process_sum_vec",
-        &janus_pair.task_parameters,
-        (janus_pair.leader.port(), janus_pair.helper.port()),
-        &ClientBackend::InProcess,
     )
-    .await;
+    .await
+}
+
+/// This test exercises Prio3SumVec with Janus as both the leader and the helper, using synchronous
+/// aggregation.
+#[tokio::test(flavor = "multi_thread")]
+async fn janus_in_process_sync_sum_vec() {
+    run_in_process_test(
+        "janus_in_process_sync_sum_vec",
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3SumVec {
+            bits: 16,
+            length: 15,
+            chunk_length: 16,
+            dp_strategy: vdaf_dp_strategies::Prio3SumVec::NoDifferentialPrivacy,
+        },
+    )
+    .await
+}
+
+/// This test exercises Prio3SumVec with Janus as both the leader and the helper, using asynchronous
+/// aggregation.
+#[tokio::test(flavor = "multi_thread")]
+async fn janus_in_process_async_sum_vec() {
+    run_in_process_test(
+        "janus_in_process_sync_sum_vec",
+        BatchMode::TimeInterval,
+        AggregationMode::Asynchronous,
+        VdafInstance::Prio3SumVec {
+            bits: 16,
+            length: 15,
+            chunk_length: 16,
+            dp_strategy: vdaf_dp_strategies::Prio3SumVec::NoDifferentialPrivacy,
+        },
+    )
+    .await
 }
 
 /// This test exercises Prio3SumVecField64MultiproofHmacSha256Aes128 with Janus as both the leader
@@ -378,6 +484,7 @@ async fn janus_in_process_customized_sum_vec() {
 
     let janus_pair = JanusInProcessPair::new(TaskBuilder::new(
         BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
         VdafInstance::Prio3SumVecField64MultiproofHmacSha256Aes128 {
             proofs: 2,
             bits: 16,
@@ -409,6 +516,7 @@ async fn janus_in_process_histogram_dp_noise() {
     let epsilon = Rational::from_unsigned(1u128, 10u128).unwrap();
     let janus_pair = JanusInProcessPair::new(TaskBuilder::new(
         BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
         VdafInstance::Prio3Histogram {
             length: HISTOGRAM_LENGTH,
             chunk_length: CHUNK_LENGTH,
@@ -471,6 +579,7 @@ async fn janus_in_process_sumvec_dp_noise() {
     let epsilon = Rational::from_unsigned(1u128, 10u128).unwrap();
     let janus_pair = JanusInProcessPair::new(TaskBuilder::new(
         BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
         VdafInstance::Prio3SumVec {
             bits: BITS,
             length: VECTOR_LENGTH,

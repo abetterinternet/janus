@@ -16,7 +16,10 @@ use janus_aggregator_core::{
         test_util::{ephemeral_datastore, EphemeralDatastore},
         Datastore,
     },
-    task::{test_util::TaskBuilder, AggregatorTask, AggregatorTaskParameters, BatchMode},
+    task::{
+        test_util::TaskBuilder, AggregationMode, AggregatorTask, AggregatorTaskParameters,
+        BatchMode,
+    },
     taskprov::test_util::PeerAggregatorBuilder,
     test_util::noop_meter,
     SecretBytes,
@@ -26,7 +29,7 @@ use janus_core::{
     hpke::HpkeKeypair,
     test_util::install_test_trace_subscriber,
     time::MockClock,
-    vdaf::{vdaf_dp_strategies, VdafInstance, VERIFY_KEY_LENGTH},
+    vdaf::{vdaf_dp_strategies, VdafInstance, VERIFY_KEY_LENGTH_PRIO3},
 };
 use janus_messages::{
     Duration, HpkeAeadId, HpkeConfig, HpkeConfigId, HpkeKdfId, HpkeKemId, HpkePublicKey, Role,
@@ -92,10 +95,14 @@ async fn get_task_ids() {
         .run_unnamed_tx(|tx| {
             Box::pin(async move {
                 let tasks: Vec<_> = iter::repeat_with(|| {
-                    TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-                        .build()
-                        .leader_view()
-                        .unwrap()
+                    TaskBuilder::new(
+                        BatchMode::TimeInterval,
+                        AggregationMode::Synchronous,
+                        VdafInstance::Fake { rounds: 1 },
+                    )
+                    .build()
+                    .leader_view()
+                    .unwrap()
                 })
                 .take(10)
                 .collect();
@@ -186,7 +193,7 @@ async fn post_task_bad_role() {
     let vdaf_verify_key = SecretBytes::new(
         thread_rng()
             .sample_iter(Standard)
-            .take(VERIFY_KEY_LENGTH)
+            .take(VERIFY_KEY_LENGTH_PRIO3)
             .collect(),
     );
     let aggregator_auth_token = AuthenticationToken::DapAuth(random());
@@ -194,6 +201,7 @@ async fn post_task_bad_role() {
     let req = PostTaskReq {
         peer_aggregator_endpoint: "http://aggregator.endpoint".try_into().unwrap(),
         batch_mode: BatchMode::TimeInterval,
+        aggregation_mode: None,
         vdaf: VdafInstance::Prio3Count,
         role: Role::Collector,
         vdaf_verify_key: URL_SAFE_NO_PAD.encode(&vdaf_verify_key),
@@ -225,7 +233,7 @@ async fn post_task_unauthorized() {
     let vdaf_verify_key = SecretBytes::new(
         thread_rng()
             .sample_iter(Standard)
-            .take(VERIFY_KEY_LENGTH)
+            .take(VERIFY_KEY_LENGTH_PRIO3)
             .collect(),
     );
     let aggregator_auth_token = AuthenticationToken::DapAuth(random());
@@ -233,6 +241,7 @@ async fn post_task_unauthorized() {
     let req = PostTaskReq {
         peer_aggregator_endpoint: "http://aggregator.endpoint".try_into().unwrap(),
         batch_mode: BatchMode::TimeInterval,
+        aggregation_mode: Some(AggregationMode::Synchronous),
         vdaf: VdafInstance::Prio3Count,
         role: Role::Helper,
         vdaf_verify_key: URL_SAFE_NO_PAD.encode(&vdaf_verify_key),
@@ -265,7 +274,7 @@ async fn post_task_helper_no_optional_fields() {
     let vdaf_verify_key = SecretBytes::new(
         thread_rng()
             .sample_iter(Standard)
-            .take(VERIFY_KEY_LENGTH)
+            .take(VERIFY_KEY_LENGTH_PRIO3)
             .collect(),
     );
 
@@ -273,6 +282,7 @@ async fn post_task_helper_no_optional_fields() {
     let req = PostTaskReq {
         peer_aggregator_endpoint: "http://aggregator.endpoint".try_into().unwrap(),
         batch_mode: BatchMode::TimeInterval,
+        aggregation_mode: Some(AggregationMode::Synchronous),
         vdaf: VdafInstance::Prio3Count,
         role: Role::Helper,
         vdaf_verify_key: URL_SAFE_NO_PAD.encode(&vdaf_verify_key),
@@ -350,7 +360,7 @@ async fn post_task_helper_with_aggregator_auth_token() {
     let vdaf_verify_key = SecretBytes::new(
         thread_rng()
             .sample_iter(Standard)
-            .take(VERIFY_KEY_LENGTH)
+            .take(VERIFY_KEY_LENGTH_PRIO3)
             .collect(),
     );
     let aggregator_auth_token = AuthenticationToken::DapAuth(random());
@@ -359,6 +369,7 @@ async fn post_task_helper_with_aggregator_auth_token() {
     let req = PostTaskReq {
         peer_aggregator_endpoint: "http://aggregator.endpoint".try_into().unwrap(),
         batch_mode: BatchMode::TimeInterval,
+        aggregation_mode: Some(AggregationMode::Synchronous),
         vdaf: VdafInstance::Prio3Count,
         role: Role::Helper,
         vdaf_verify_key: URL_SAFE_NO_PAD.encode(&vdaf_verify_key),
@@ -391,7 +402,7 @@ async fn post_task_idempotence() {
     let vdaf_verify_key = SecretBytes::new(
         thread_rng()
             .sample_iter(Standard)
-            .take(VERIFY_KEY_LENGTH)
+            .take(VERIFY_KEY_LENGTH_PRIO3)
             .collect(),
     );
     let aggregator_auth_token = AuthenticationToken::DapAuth(random());
@@ -400,6 +411,7 @@ async fn post_task_idempotence() {
     let mut req = PostTaskReq {
         peer_aggregator_endpoint: "http://aggregator.endpoint".try_into().unwrap(),
         batch_mode: BatchMode::TimeInterval,
+        aggregation_mode: Some(AggregationMode::Synchronous),
         vdaf: VdafInstance::Prio3Count,
         role: Role::Leader,
         vdaf_verify_key: URL_SAFE_NO_PAD.encode(&vdaf_verify_key),
@@ -470,7 +482,7 @@ async fn post_task_leader_all_optional_fields() {
     let vdaf_verify_key = SecretBytes::new(
         thread_rng()
             .sample_iter(Standard)
-            .take(VERIFY_KEY_LENGTH)
+            .take(VERIFY_KEY_LENGTH_PRIO3)
             .collect(),
     );
     let aggregator_auth_token = AuthenticationToken::DapAuth(random());
@@ -479,6 +491,7 @@ async fn post_task_leader_all_optional_fields() {
     let req = PostTaskReq {
         peer_aggregator_endpoint: "http://aggregator.endpoint".try_into().unwrap(),
         batch_mode: BatchMode::TimeInterval,
+        aggregation_mode: Some(AggregationMode::Synchronous),
         vdaf: VdafInstance::Prio3Count,
         role: Role::Leader,
         vdaf_verify_key: URL_SAFE_NO_PAD.encode(&vdaf_verify_key),
@@ -555,7 +568,7 @@ async fn post_task_leader_no_aggregator_auth_token() {
     let vdaf_verify_key = SecretBytes::new(
         thread_rng()
             .sample_iter(Standard)
-            .take(VERIFY_KEY_LENGTH)
+            .take(VERIFY_KEY_LENGTH_PRIO3)
             .collect(),
     );
 
@@ -563,6 +576,7 @@ async fn post_task_leader_no_aggregator_auth_token() {
     let req = PostTaskReq {
         peer_aggregator_endpoint: "http://aggregator.endpoint".try_into().unwrap(),
         batch_mode: BatchMode::TimeInterval,
+        aggregation_mode: Some(AggregationMode::Synchronous),
         vdaf: VdafInstance::Prio3Count,
         role: Role::Leader,
         vdaf_verify_key: URL_SAFE_NO_PAD.encode(&vdaf_verify_key),
@@ -595,10 +609,14 @@ async fn get_task(#[case] role: Role) {
     // Setup: write a task to the datastore.
     let (handler, _ephemeral_datastore, ds) = setup_api_test().await;
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-        .build()
-        .view_for_role(role)
-        .unwrap();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 1 },
+    )
+    .build()
+    .view_for_role(role)
+    .unwrap();
 
     ds.put_aggregator_task(&task).await.unwrap();
 
@@ -651,11 +669,14 @@ async fn delete_task() {
     let task_id = ds
         .run_unnamed_tx(|tx| {
             Box::pin(async move {
-                let task =
-                    TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-                        .build()
-                        .leader_view()
-                        .unwrap();
+                let task = TaskBuilder::new(
+                    BatchMode::TimeInterval,
+                    AggregationMode::Synchronous,
+                    VdafInstance::Fake { rounds: 1 },
+                )
+                .build()
+                .leader_view()
+                .unwrap();
 
                 tx.put_aggregator_task(&task).await?;
 
@@ -726,11 +747,15 @@ async fn patch_task(#[case] role: Role) {
     // Setup: write a task to the datastore.
     let (handler, _ephemeral_datastore, ds) = setup_api_test().await;
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-        .with_task_end(Some(Time::from_seconds_since_epoch(1000)))
-        .build()
-        .view_for_role(role)
-        .unwrap();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 1 },
+    )
+    .with_task_end(Some(Time::from_seconds_since_epoch(1000)))
+    .build()
+    .view_for_role(role)
+    .unwrap();
 
     ds.put_aggregator_task(&task).await.unwrap();
     let task_id = *task.id();
@@ -842,11 +867,14 @@ async fn get_task_upload_metrics() {
     let task_id = ds
         .run_unnamed_tx(|tx| {
             Box::pin(async move {
-                let task =
-                    TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-                        .build()
-                        .leader_view()
-                        .unwrap();
+                let task = TaskBuilder::new(
+                    BatchMode::TimeInterval,
+                    AggregationMode::Synchronous,
+                    VdafInstance::Fake { rounds: 1 },
+                )
+                .build()
+                .leader_view()
+                .unwrap();
                 let task_id = *task.id();
                 tx.put_aggregator_task(&task).await.unwrap();
 
@@ -921,11 +949,14 @@ async fn get_task_aggregation_metrics() {
     let task_id = ds
         .run_unnamed_tx(|tx| {
             Box::pin(async move {
-                let task =
-                    TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-                        .build()
-                        .leader_view()
-                        .unwrap();
+                let task = TaskBuilder::new(
+                    BatchMode::TimeInterval,
+                    AggregationMode::Synchronous,
+                    VdafInstance::Fake { rounds: 1 },
+                )
+                .build()
+                .leader_view()
+                .unwrap();
                 let task_id = *task.id();
                 tx.put_aggregator_task(&task).await.unwrap();
 
@@ -1423,11 +1454,11 @@ async fn get_taskprov_peer_aggregator() {
 
     let leader = PeerAggregatorBuilder::new()
         .with_endpoint(Url::parse("https://leader.example.com/").unwrap())
-        .with_role(Role::Leader)
+        .with_peer_role(Role::Leader)
         .build();
     let helper = PeerAggregatorBuilder::new()
         .with_endpoint(Url::parse("https://helper.example.com/").unwrap())
-        .with_role(Role::Helper)
+        .with_peer_role(Role::Helper)
         .build();
 
     ds.run_unnamed_tx(|tx| {
@@ -1464,14 +1495,14 @@ async fn get_taskprov_peer_aggregator() {
     let mut expected = vec![
         TaskprovPeerAggregatorResp {
             endpoint: leader.endpoint().clone(),
-            role: *leader.role(),
+            peer_role: *leader.peer_role(),
             collector_hpke_config: leader.collector_hpke_config().clone(),
             report_expiry_age: leader.report_expiry_age().cloned(),
             tolerable_clock_skew: *leader.tolerable_clock_skew(),
         },
         TaskprovPeerAggregatorResp {
             endpoint: helper.endpoint().clone(),
-            role: *helper.role(),
+            peer_role: *helper.peer_role(),
             collector_hpke_config: helper.collector_hpke_config().clone(),
             report_expiry_age: helper.report_expiry_age().cloned(),
             tolerable_clock_skew: *helper.tolerable_clock_skew(),
@@ -1499,12 +1530,13 @@ async fn post_taskprov_peer_aggregator() {
     let endpoint = Url::parse("https://leader.example.com/").unwrap();
     let leader = PeerAggregatorBuilder::new()
         .with_endpoint(endpoint.clone())
-        .with_role(Role::Leader)
+        .with_peer_role(Role::Leader)
         .build();
 
     let req = PostTaskprovPeerAggregatorReq {
         endpoint,
-        role: Role::Leader,
+        peer_role: Role::Leader,
+        aggregation_mode: Some(AggregationMode::Synchronous),
         collector_hpke_config: leader.collector_hpke_config().clone(),
         verify_key_init: *leader.verify_key_init(),
         report_expiry_age: leader.report_expiry_age().cloned(),
@@ -1574,7 +1606,7 @@ async fn delete_taskprov_peer_aggregator() {
     let endpoint = Url::parse("https://leader.example.com/").unwrap();
     let leader = PeerAggregatorBuilder::new()
         .with_endpoint(endpoint.clone())
-        .with_role(Role::Leader)
+        .with_peer_role(Role::Leader)
         .build();
 
     ds.run_unnamed_tx(|tx| {
@@ -1586,7 +1618,7 @@ async fn delete_taskprov_peer_aggregator() {
 
     let req = DeleteTaskprovPeerAggregatorReq {
         endpoint,
-        role: Role::Leader,
+        peer_role: Role::Leader,
     };
 
     // Delete target.
@@ -1616,7 +1648,7 @@ async fn delete_taskprov_peer_aggregator() {
             .with_request_body(
                 serde_json::to_vec(&DeleteTaskprovPeerAggregatorReq {
                     endpoint: Url::parse("https://doesnt-exist.example.com/").unwrap(),
-                    role: Role::Leader,
+                    peer_role: Role::Leader,
                 })
                 .unwrap()
             )
@@ -1689,6 +1721,7 @@ fn post_task_req_serialization() {
             batch_mode: BatchMode::LeaderSelected {
                 batch_time_window_size: None,
             },
+            aggregation_mode: Some(AggregationMode::Synchronous),
             vdaf: VdafInstance::Prio3SumVec {
                 bits: 1,
                 length: 5,
@@ -1714,7 +1747,7 @@ fn post_task_req_serialization() {
         &[
             Token::Struct {
                 name: "PostTaskReq",
-                len: 12,
+                len: 13,
             },
             Token::Str("peer_aggregator_endpoint"),
             Token::Str("https://example.com/"),
@@ -1727,6 +1760,12 @@ fn post_task_req_serialization() {
             Token::Str("batch_time_window_size"),
             Token::None,
             Token::StructVariantEnd,
+            Token::Str("aggregation_mode"),
+            Token::Some,
+            Token::UnitVariant {
+                name: "AggregationMode",
+                variant: "Synchronous",
+            },
             Token::Str("vdaf"),
             Token::StructVariant {
                 name: "VdafInstance",
@@ -1807,6 +1846,7 @@ fn post_task_req_serialization() {
             batch_mode: BatchMode::LeaderSelected {
                 batch_time_window_size: None,
             },
+            aggregation_mode: None,
             vdaf: VdafInstance::Prio3SumVec {
                 bits: 1,
                 length: 5,
@@ -1836,7 +1876,7 @@ fn post_task_req_serialization() {
         &[
             Token::Struct {
                 name: "PostTaskReq",
-                len: 12,
+                len: 13,
             },
             Token::Str("peer_aggregator_endpoint"),
             Token::Str("https://example.com/"),
@@ -1849,6 +1889,8 @@ fn post_task_req_serialization() {
             Token::Str("batch_time_window_size"),
             Token::None,
             Token::StructVariantEnd,
+            Token::Str("aggregation_mode"),
+            Token::None,
             Token::Str("vdaf"),
             Token::StructVariant {
                 name: "VdafInstance",

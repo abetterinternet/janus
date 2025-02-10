@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use educe::Educe;
 use janus_aggregator_core::{
     datastore::models::{HpkeKeyState, HpkeKeypair, TaskAggregationCounter, TaskUploadCounter},
-    task::{AggregatorTask, BatchMode},
+    task::{AggregationMode, AggregatorTask, BatchMode},
     taskprov::{PeerAggregator, VerifyKeyInit},
 };
 use janus_core::{
@@ -65,6 +65,9 @@ pub(crate) struct PostTaskReq {
     pub(crate) peer_aggregator_endpoint: Url,
     /// DAP batch mode for this task.
     pub(crate) batch_mode: BatchMode,
+    /// Aggregation mode (e.g. synchronous vs asynchronous) for this task. Populated if and only if
+    /// this is a Helper task.
+    pub(crate) aggregation_mode: Option<AggregationMode>,
     /// The VDAF being run by this task.
     pub(crate) vdaf: VdafInstance,
     /// The role that this aggregator will play in this task.
@@ -202,7 +205,7 @@ pub(crate) struct PatchHpkeConfigReq {
 pub(crate) struct TaskprovPeerAggregatorResp {
     #[educe(Debug(method(std::fmt::Display::fmt)))]
     pub(crate) endpoint: Url,
-    pub(crate) role: Role,
+    pub(crate) peer_role: Role,
     pub(crate) collector_hpke_config: HpkeConfig,
     pub(crate) report_expiry_age: Option<Duration>,
     pub(crate) tolerable_clock_skew: Duration,
@@ -213,7 +216,7 @@ impl From<PeerAggregator> for TaskprovPeerAggregatorResp {
         // Exclude sensitive values.
         Self {
             endpoint: value.endpoint().clone(),
-            role: *value.role(),
+            peer_role: *value.peer_role(),
             collector_hpke_config: value.collector_hpke_config().clone(),
             report_expiry_age: value.report_expiry_age().cloned(),
             tolerable_clock_skew: *value.tolerable_clock_skew(),
@@ -224,7 +227,8 @@ impl From<PeerAggregator> for TaskprovPeerAggregatorResp {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct PostTaskprovPeerAggregatorReq {
     pub(crate) endpoint: Url,
-    pub(crate) role: Role,
+    pub(crate) peer_role: Role,
+    pub(crate) aggregation_mode: Option<AggregationMode>,
     pub(crate) collector_hpke_config: HpkeConfig,
     pub(crate) verify_key_init: VerifyKeyInit,
     pub(crate) report_expiry_age: Option<Duration>,
@@ -236,7 +240,7 @@ pub(crate) struct PostTaskprovPeerAggregatorReq {
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct DeleteTaskprovPeerAggregatorReq {
     pub(crate) endpoint: Url,
-    pub(crate) role: Role,
+    pub(crate) peer_role: Role,
 }
 
 // Any value that is present is considered Some value, including null. See

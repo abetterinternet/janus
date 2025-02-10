@@ -16,7 +16,7 @@ use janus_aggregator_core::{
     },
     task::{
         test_util::{Task, TaskBuilder},
-        BatchMode,
+        AggregationMode, BatchMode,
     },
     test_util::noop_meter,
 };
@@ -259,7 +259,12 @@ pub(crate) async fn setup_collection_job_test_case(
 ) -> CollectionJobTestCase {
     install_test_trace_subscriber();
 
-    let task = TaskBuilder::new(batch_mode, VdafInstance::Fake { rounds: 1 }).build();
+    let task = TaskBuilder::new(
+        batch_mode,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 1 },
+    )
+    .build();
     let role_task = task.view_for_role(role).unwrap();
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;

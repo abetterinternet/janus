@@ -13,15 +13,15 @@ use std::str;
 
 /// The length of the verify key parameter for Prio3 VDAF instantiations using
 /// [`XofTurboShake128`][prio::vdaf::xof::XofTurboShake128].
-pub const VERIFY_KEY_LENGTH: usize = 32;
+pub const VERIFY_KEY_LENGTH_PRIO3: usize = 32;
+
+/// The length of the verify key parameter when using [`XofHmacSha256Aes128`]. This XOF is not part
+/// of the VDAF specification.
+pub const VERIFY_KEY_LENGTH_PRIO3_HMACSHA256_AES128: usize = 32;
 
 /// Private use algorithm ID for a customized version of Prio3SumVec. This value was chosen for
 /// interoperability with Daphne.
 const ALGORITHM_ID_PRIO3_SUM_VEC_FIELD64_MULTIPROOF_HMACSHA256_AES128: u32 = 0xFFFF_1003;
-
-/// The length of the verify key parameter when using [`XofHmacSha256Aes128`]. This XOF is not part
-/// of the VDAF specification.
-pub const VERIFY_KEY_LENGTH_HMACSHA256_AES128: usize = 32;
 
 /// Computes the VDAF "application context", which is an opaque byte string used by many VDAF
 /// operations for domain-separation purposes. In DAP, this is the DAP draft number concatenated
@@ -167,11 +167,11 @@ impl VdafInstance {
             | VdafInstance::FakeFailsPrepStep => 0,
 
             VdafInstance::Prio3SumVecField64MultiproofHmacSha256Aes128 { .. } => {
-                VERIFY_KEY_LENGTH_HMACSHA256_AES128
+                VERIFY_KEY_LENGTH_PRIO3_HMACSHA256_AES128
             }
 
             // All other VDAFs (Prio3 as-specified) have the same verify key length.
-            _ => VERIFY_KEY_LENGTH,
+            _ => VERIFY_KEY_LENGTH_PRIO3,
         }
     }
 }
@@ -258,7 +258,7 @@ macro_rules! vdaf_dispatch_impl_base {
             ::janus_core::vdaf::VdafInstance::Prio3Count => {
                 let $vdaf = ::prio::vdaf::prio3::Prio3::new_count(2)?;
                 type $Vdaf = ::prio::vdaf::prio3::Prio3Count;
-                const $VERIFY_KEY_LEN: usize = ::janus_core::vdaf::VERIFY_KEY_LENGTH;
+                const $VERIFY_KEY_LEN: usize = ::janus_core::vdaf::VERIFY_KEY_LENGTH_PRIO3;
                 type $DpStrategy = janus_core::dp::NoDifferentialPrivacy;
                 let $dp_strategy = janus_core::dp::NoDifferentialPrivacy;
                 $body
@@ -267,7 +267,7 @@ macro_rules! vdaf_dispatch_impl_base {
             ::janus_core::vdaf::VdafInstance::Prio3Sum { max_measurement } => {
                 let $vdaf = ::prio::vdaf::prio3::Prio3::new_sum(2, *max_measurement)?;
                 type $Vdaf = ::prio::vdaf::prio3::Prio3Sum;
-                const $VERIFY_KEY_LEN: usize = ::janus_core::vdaf::VERIFY_KEY_LENGTH;
+                const $VERIFY_KEY_LEN: usize = ::janus_core::vdaf::VERIFY_KEY_LENGTH_PRIO3;
                 type $DpStrategy = janus_core::dp::NoDifferentialPrivacy;
                 let $dp_strategy = janus_core::dp::NoDifferentialPrivacy;
                 $body
@@ -282,7 +282,7 @@ macro_rules! vdaf_dispatch_impl_base {
                 let $vdaf =
                     ::prio::vdaf::prio3::Prio3::new_sum_vec(2, *bits, *length, *chunk_length)?;
                 type $Vdaf = ::prio::vdaf::prio3::Prio3SumVec;
-                const $VERIFY_KEY_LEN: usize = ::janus_core::vdaf::VERIFY_KEY_LENGTH;
+                const $VERIFY_KEY_LEN: usize = ::janus_core::vdaf::VERIFY_KEY_LENGTH_PRIO3;
                 match dp_strategy.clone() {
                     ::janus_core::vdaf::vdaf_dp_strategies::Prio3SumVec::NoDifferentialPrivacy => {
                         type $DpStrategy = janus_core::dp::NoDifferentialPrivacy;
@@ -320,7 +320,7 @@ macro_rules! vdaf_dispatch_impl_base {
                     >,
                 >;
                 const $VERIFY_KEY_LEN: usize =
-                    ::janus_core::vdaf::VERIFY_KEY_LENGTH_HMACSHA256_AES128;
+                    ::janus_core::vdaf::VERIFY_KEY_LENGTH_PRIO3_HMACSHA256_AES128;
                 match dp_strategy.clone() {
                     ::janus_core::vdaf::vdaf_dp_strategies::Prio3SumVec::NoDifferentialPrivacy => {
                         type $DpStrategy = janus_core::dp::NoDifferentialPrivacy;
@@ -344,7 +344,7 @@ macro_rules! vdaf_dispatch_impl_base {
             } => {
                 let $vdaf = ::prio::vdaf::prio3::Prio3::new_histogram(2, *length, *chunk_length)?;
                 type $Vdaf = ::prio::vdaf::prio3::Prio3Histogram;
-                const $VERIFY_KEY_LEN: usize = ::janus_core::vdaf::VERIFY_KEY_LENGTH;
+                const $VERIFY_KEY_LEN: usize = ::janus_core::vdaf::VERIFY_KEY_LENGTH_PRIO3;
                 match dp_strategy.clone() {
                     ::janus_core::vdaf::vdaf_dp_strategies::Prio3Histogram::NoDifferentialPrivacy => {
                         type $DpStrategy = janus_core::dp::NoDifferentialPrivacy;
@@ -371,7 +371,7 @@ macro_rules! vdaf_dispatch_impl_fpvec_bounded_l2 {
     (impl match fpvec_bounded_l2 $vdaf_instance:expr, ($vdaf:ident, $Vdaf:ident, $VERIFY_KEY_LEN:ident, $dp_strategy:ident, $DpStrategy:ident) => $body:tt) => {
         match $vdaf_instance {
             ::janus_core::vdaf::VdafInstance::Prio3FixedPointBoundedL2VecSum { bitsize, dp_strategy, length } => {
-                const $VERIFY_KEY_LEN: usize = ::janus_core::vdaf::VERIFY_KEY_LENGTH;
+                const $VERIFY_KEY_LEN: usize = ::janus_core::vdaf::VERIFY_KEY_LENGTH_PRIO3;
 
                 match dp_strategy.clone() {
                     janus_core::vdaf::vdaf_dp_strategies::Prio3FixedPointBoundedL2VecSum::ZCdpDiscreteGaussian(_strategy) => {

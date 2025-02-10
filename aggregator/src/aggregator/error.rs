@@ -60,6 +60,9 @@ pub enum Error {
     /// An attempt was made to act on an unknown aggregation job.
     #[error("task {0}: unrecognized aggregation job: {1}")]
     UnrecognizedAggregationJob(TaskId, AggregationJobId),
+    /// An attempt was made to act on a known but abandoned aggregation job.
+    #[error("task {0}: abandoned aggregation job: {1}")]
+    AbandonedAggregationJob(TaskId, AggregationJobId),
     /// An attempt was made to act on a known but deleted aggregation job.
     #[error("task {0}: deleted aggregation job: {1}")]
     DeletedAggregationJob(TaskId, AggregationJobId),
@@ -291,6 +294,7 @@ impl Error {
             Error::UnrecognizedTask(_) => "unrecognized_task",
             Error::MissingTaskId => "missing_task_id",
             Error::UnrecognizedAggregationJob(_, _) => "unrecognized_aggregation_job",
+            Error::AbandonedAggregationJob(_, _) => "abandoned_aggregation_job",
             Error::DeletedAggregationJob(_, _) => "deleted_aggregation_job",
             Error::DeletedCollectionJob(_, _) => "deleted_collection_job",
             Error::AbandonedCollectionJob(_, _) => "abandoned_collection_job",

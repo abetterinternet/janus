@@ -157,6 +157,12 @@ pub(super) async fn post_task<C: Clock>(
                 AggregatorTaskParameters::Helper {
                     aggregator_auth_token_hash,
                     collector_hpke_config: req.collector_hpke_config,
+                    aggregation_mode: req.aggregation_mode.ok_or_else(|| {
+                        Error::BadRequest(
+                            "aggregator acting in helper role must be provided an aggregation mode"
+                                .to_string(),
+                        )
+                    })?,
                 },
             )
         }
@@ -442,7 +448,8 @@ pub(super) async fn post_taskprov_peer_aggregator<C: Clock>(
 ) -> Result<(Status, Json<TaskprovPeerAggregatorResp>), Error> {
     let to_insert = PeerAggregator::new(
         req.endpoint,
-        req.role,
+        req.peer_role,
+        req.aggregation_mode,
         req.verify_key_init,
         req.collector_hpke_config,
         req.report_expiry_age,
@@ -456,7 +463,7 @@ pub(super) async fn post_taskprov_peer_aggregator<C: Clock>(
             let to_insert = to_insert.clone();
             Box::pin(async move {
                 tx.put_taskprov_peer_aggregator(&to_insert).await?;
-                tx.get_taskprov_peer_aggregator(to_insert.endpoint(), to_insert.role())
+                tx.get_taskprov_peer_aggregator(to_insert.endpoint(), to_insert.peer_role())
                     .await
             })
         })
@@ -478,7 +485,7 @@ pub(super) async fn delete_taskprov_peer_aggregator<C: Clock>(
         .run_tx("delete_taskprov_peer_aggregator", |tx| {
             let req = req.clone();
             Box::pin(async move {
-                tx.delete_taskprov_peer_aggregator(&req.endpoint, &req.role)
+                tx.delete_taskprov_peer_aggregator(&req.endpoint, &req.peer_role)
                     .await
             })
         })

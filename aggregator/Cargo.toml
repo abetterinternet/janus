@@ -29,14 +29,13 @@ test-util = [
     "janus_aggregator_core/test-util",
     "janus_core/test-util",
     "janus_messages/test-util",
-    "dep:assert_matches",
     "dep:testcontainers",
     "dep:trillium-testing",
 ]
 
 [dependencies]
 anyhow.workspace = true
-assert_matches = { workspace = true, optional = true }
+assert_matches = { workspace = true }
 async-trait = { workspace = true }
 aws-lc-rs = { workspace = true }
 backoff = { workspace = true, features = ["tokio"] }
@@ -71,6 +70,7 @@ postgres-protocol = { workspace = true }
 postgres-types = { workspace = true, features = ["derive", "array-impls"] }
 prio.workspace = true
 prometheus = { workspace = true, optional = true }
+querystring = { workspace = true }
 rand = { workspace = true, features = ["min_const_gen"] }
 rayon.workspace = true
 regex = { workspace = true }

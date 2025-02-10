@@ -12,7 +12,7 @@ use crate::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use janus_aggregator_core::{
     datastore::models::HpkeKeyState,
-    task::{test_util::TaskBuilder, BatchMode},
+    task::{test_util::TaskBuilder, AggregationMode, BatchMode},
     test_util::noop_meter,
 };
 use janus_core::{
@@ -156,7 +156,12 @@ async fn hpke_config_with_taskprov() {
     } = HttpHandlerTest::new().await;
 
     // Insert a taskprov task.
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count).build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .build();
     let taskprov_helper_task = task.taskprov_helper_view().unwrap();
     datastore
         .put_aggregator_task(&taskprov_helper_task)
@@ -226,10 +231,14 @@ async fn hpke_config_cors_headers() {
         ..
     } = HttpHandlerTest::new().await;
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-        .build()
-        .leader_view()
-        .unwrap();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .build()
+    .leader_view()
+    .unwrap();
     datastore.put_aggregator_task(&task).await.unwrap();
 
     // Check for appropriate CORS headers in response to a preflight request.

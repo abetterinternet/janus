@@ -12,7 +12,7 @@ use janus_aggregator::{
 };
 use janus_aggregator_core::{
     datastore::Datastore,
-    task::{self, AggregatorTask, AggregatorTaskParameters},
+    task::{self, AggregationMode, AggregatorTask, AggregatorTaskParameters},
     SecretBytes,
 };
 use janus_core::{
@@ -80,6 +80,8 @@ async fn handle_add_task(
         (AggregatorRole::Helper, _) => AggregatorTaskParameters::Helper {
             aggregator_auth_token_hash: AuthenticationTokenHash::from(&leader_authentication_token),
             collector_hpke_config,
+            // TODO(#3436): allow callers to specify asynchronous aggregation mode (requires updated interop test design)
+            aggregation_mode: AggregationMode::Synchronous,
         },
     };
 

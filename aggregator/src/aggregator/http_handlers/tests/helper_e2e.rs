@@ -1,5 +1,5 @@
 use assert_matches::assert_matches;
-use janus_aggregator_core::task::{test_util::TaskBuilder, BatchMode};
+use janus_aggregator_core::task::{test_util::TaskBuilder, AggregationMode, BatchMode};
 use janus_core::{report_id::ReportIdChecksumExt, vdaf::VdafInstance};
 use janus_messages::{
     batch_mode::LeaderSelected, AggregateShareReq, AggregationJobInitializeReq, AggregationJobResp,
@@ -14,7 +14,7 @@ use trillium::Status;
 use trillium_testing::assert_status;
 
 use crate::aggregator::{
-    aggregate_init_tests::{put_aggregation_job, PrepareInitGenerator},
+    aggregation_job_init::test_util::{put_aggregation_job, PrepareInitGenerator},
     http_handlers::{
         test_util::{take_response_body, HttpHandlerTest},
         tests::aggregate_share::post_aggregate_share_request,
@@ -38,6 +38,7 @@ async fn helper_aggregation_report_share_replay() {
         BatchMode::LeaderSelected {
             batch_time_window_size: None,
         },
+        AggregationMode::Synchronous,
         VdafInstance::Fake { rounds: 1 },
     )
     .with_min_batch_size(1)

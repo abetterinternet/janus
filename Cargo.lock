@@ -2752,6 +2752,7 @@ dependencies = [
  "postgres-types",
  "prio 0.17.0-alpha.0",
  "prometheus",
+ "querystring",
  "quickcheck",
  "quickcheck_macros",
  "rand 0.8.5",

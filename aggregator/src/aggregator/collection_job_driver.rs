@@ -810,7 +810,7 @@ mod tests {
         },
         task::{
             test_util::{Task, TaskBuilder},
-            BatchMode,
+            AggregationMode, BatchMode,
         },
         test_util::noop_meter,
     };
@@ -845,11 +845,15 @@ mod tests {
         CollectionJob<0, TimeInterval, dummy::Vdaf>,
     ) {
         let time_precision = Duration::from_seconds(500);
-        let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-            .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-            .with_time_precision(time_precision)
-            .with_min_batch_size(10)
-            .build();
+        let task = TaskBuilder::new(
+            BatchMode::TimeInterval,
+            AggregationMode::Synchronous,
+            VdafInstance::Fake { rounds: 1 },
+        )
+        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+        .with_time_precision(time_precision)
+        .with_min_batch_size(10)
+        .build();
 
         let leader_task = task.leader_view().unwrap();
         let batch_interval = Interval::new(clock.now(), Duration::from_seconds(2000)).unwrap();
@@ -985,11 +989,15 @@ mod tests {
         let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
 
         let time_precision = Duration::from_seconds(500);
-        let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-            .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-            .with_time_precision(time_precision)
-            .with_min_batch_size(10)
-            .build();
+        let task = TaskBuilder::new(
+            BatchMode::TimeInterval,
+            AggregationMode::Synchronous,
+            VdafInstance::Fake { rounds: 1 },
+        )
+        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+        .with_time_precision(time_precision)
+        .with_min_batch_size(10)
+        .build();
 
         let leader_task = task.leader_view().unwrap();
         let agg_auth_token = task.aggregator_auth_token();

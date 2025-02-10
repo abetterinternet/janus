@@ -6,7 +6,7 @@ use assert_matches::assert_matches;
 use janus_aggregator_core::{
     batch_mode::AccumulableBatchMode,
     datastore::models::{CollectionJob, CollectionJobState},
-    task::{test_util::TaskBuilder, BatchMode},
+    task::{test_util::TaskBuilder, AggregationMode, BatchMode},
 };
 use janus_core::{
     hpke::{self, HpkeApplicationInfo, Label},
@@ -146,9 +146,13 @@ async fn collection_job_put_request_invalid_batch_size() {
     } = HttpHandlerTest::new().await;
 
     // Prepare parameters.
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-        .with_min_batch_size(1)
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 1 },
+    )
+    .with_min_batch_size(1)
+    .build();
     let leader_task = task.leader_view().unwrap();
     datastore.put_aggregator_task(&leader_task).await.unwrap();
 

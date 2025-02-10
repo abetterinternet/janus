@@ -24,7 +24,7 @@ use janus_aggregator::{
 };
 use janus_aggregator_core::{
     datastore::test_util::ephemeral_datastore,
-    task::{test_util::TaskBuilder, BatchMode},
+    task::{test_util::TaskBuilder, AggregationMode, BatchMode},
 };
 use janus_core::{
     hpke::HpkeCiphersuite, test_util::install_test_trace_subscriber, time::RealClock,
@@ -140,10 +140,14 @@ async fn graceful_shutdown<C: BinaryConfig + Serialize>(binary_name: &str, mut c
     common_config.database.connection_pool_timeouts_s = 60;
     common_config.health_check_listen_address = health_check_listen_address;
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-        .build()
-        .leader_view()
-        .unwrap();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .build()
+    .leader_view()
+    .unwrap();
     datastore.put_aggregator_task(&task).await.unwrap();
 
     // Save the above configuration to a temporary file, so that we can pass
@@ -415,6 +419,8 @@ async fn aggregation_job_driver_shutdown() {
         taskprov_config: TaskprovConfig::default(),
         batch_aggregation_shard_count: 32,
         task_counter_shard_count: 32,
+        hpke_configs_refresh_interval: None,
+        default_async_poll_interval: 1000,
     };
 
     graceful_shutdown("aggregation_job_driver", config).await;

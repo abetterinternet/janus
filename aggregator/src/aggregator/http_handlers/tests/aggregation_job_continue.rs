@@ -17,7 +17,7 @@ use janus_aggregator_core::{
         merge_batch_aggregations_by_batch, AggregationJob, AggregationJobState, BatchAggregation,
         BatchAggregationState, ReportAggregation, ReportAggregationState, TaskAggregationCounter,
     },
-    task::{test_util::TaskBuilder, BatchMode, VerifyKey},
+    task::{test_util::TaskBuilder, AggregationMode, BatchMode, VerifyKey},
 };
 use janus_core::{
     report_id::ReportIdChecksumExt,
@@ -27,9 +27,8 @@ use janus_core::{
 };
 use janus_messages::{
     batch_mode::TimeInterval, AggregationJobContinueReq, AggregationJobResp, AggregationJobStep,
-    Duration, HpkeCiphertext, HpkeConfigId, Interval, PrepareContinue, PrepareResp,
-    PrepareStepResult, ReportError, ReportId, ReportIdChecksum, ReportMetadata, ReportShare, Role,
-    Time,
+    Duration, Interval, PrepareContinue, PrepareResp, PrepareStepResult, ReportError, ReportId,
+    ReportIdChecksum, ReportMetadata, Role, Time,
 };
 use prio::{
     topology::ping_pong::PingPongMessage,
@@ -40,7 +39,7 @@ use std::sync::Arc;
 use trillium::Status;
 
 #[tokio::test]
-async fn aggregate_continue() {
+async fn aggregate_continue_sync() {
     let HttpHandlerTest {
         clock,
         ephemeral_datastore: _ephemeral_datastore,
@@ -51,7 +50,12 @@ async fn aggregate_continue() {
     } = HttpHandlerTest::new().await;
 
     let aggregation_job_id = random();
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 }).build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .build();
     let helper_task = task.helper_view().unwrap();
 
     let vdaf = Arc::new(dummy::Vdaf::new(2));
@@ -148,51 +152,57 @@ async fn aggregate_continue() {
 
     datastore
         .run_unnamed_tx(|tx| {
-            let task = helper_task.clone();
-            let (report_share_0, report_share_1, report_share_2) = (
-                report_share_0.clone(),
-                report_share_1.clone(),
-                report_share_2.clone(),
-            );
-            let (helper_prep_state_0, helper_prep_state_1, helper_prep_state_2) = (
-                *helper_prep_state_0,
-                *helper_prep_state_1,
-                *helper_prep_state_2,
-            );
-            let (report_metadata_0, report_metadata_1, report_metadata_2) = (
-                report_metadata_0.clone(),
-                report_metadata_1.clone(),
-                report_metadata_2.clone(),
-            );
+            let helper_task = helper_task.clone();
+            let report_share_0 = report_share_0.clone();
+            let report_share_1 = report_share_1.clone();
+            let report_share_2 = report_share_2.clone();
+            let helper_prep_state_0 = *helper_prep_state_0;
+            let helper_prep_state_1 = *helper_prep_state_1;
+            let helper_prep_state_2 = *helper_prep_state_2;
+            let report_metadata_0 = report_metadata_0.clone();
+            let report_metadata_1 = report_metadata_1.clone();
+            let report_metadata_2 = report_metadata_2.clone();
 
             Box::pin(async move {
-                tx.put_aggregator_task(&task).await.unwrap();
+                tx.put_aggregator_task(&helper_task).await.unwrap();
 
-                tx.put_scrubbed_report(task.id(), &report_share_0)
-                    .await
-                    .unwrap();
-                tx.put_scrubbed_report(task.id(), &report_share_1)
-                    .await
-                    .unwrap();
-                tx.put_scrubbed_report(task.id(), &report_share_2)
-                    .await
-                    .unwrap();
+                tx.put_scrubbed_report(
+                    helper_task.id(),
+                    report_share_0.metadata().id(),
+                    report_share_0.metadata().time(),
+                )
+                .await
+                .unwrap();
+                tx.put_scrubbed_report(
+                    helper_task.id(),
+                    report_share_1.metadata().id(),
+                    report_share_1.metadata().time(),
+                )
+                .await
+                .unwrap();
+                tx.put_scrubbed_report(
+                    helper_task.id(),
+                    report_share_2.metadata().id(),
+                    report_share_2.metadata().time(),
+                )
+                .await
+                .unwrap();
 
                 tx.put_aggregation_job(&AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     aggregation_param,
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::AwaitingRequest,
                     AggregationJobStep::from(0),
                 ))
                 .await
                 .unwrap();
 
                 tx.put_report_aggregation::<0, dummy::Vdaf>(&ReportAggregation::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     *report_metadata_0.id(),
                     *report_metadata_0.time(),
@@ -205,7 +215,7 @@ async fn aggregate_continue() {
                 .await
                 .unwrap();
                 tx.put_report_aggregation::<0, dummy::Vdaf>(&ReportAggregation::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     *report_metadata_1.id(),
                     *report_metadata_1.time(),
@@ -218,7 +228,7 @@ async fn aggregate_continue() {
                 .await
                 .unwrap();
                 tx.put_report_aggregation::<0, dummy::Vdaf>(&ReportAggregation::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     *report_metadata_2.id(),
                     *report_metadata_2.time(),
@@ -235,10 +245,13 @@ async fn aggregate_continue() {
                 // into, which will cause it to fail to prepare.
                 try_join_all(
                     empty_batch_aggregations::<0, TimeInterval, dummy::Vdaf>(
-                        &task,
+                        &helper_task,
                         BATCH_AGGREGATION_SHARD_COUNT,
-                        &Interval::new(Time::from_seconds_since_epoch(0), *task.time_precision())
-                            .unwrap(),
+                        &Interval::new(
+                            Time::from_seconds_since_epoch(0),
+                            *helper_task.time_precision(),
+                        )
+                        .unwrap(),
                         &aggregation_param,
                         &[],
                     )
@@ -374,6 +387,258 @@ async fn aggregate_continue() {
 }
 
 #[tokio::test]
+async fn aggregate_continue_async() {
+    let HttpHandlerTest {
+        clock,
+        ephemeral_datastore: _ephemeral_datastore,
+        datastore,
+        handler,
+        hpke_keypair: hpke_key,
+        ..
+    } = HttpHandlerTest::new().await;
+
+    let aggregation_job_id = random();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Asynchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .build();
+    let helper_task = task.helper_view().unwrap();
+
+    let vdaf = Arc::new(dummy::Vdaf::new(2));
+    let verify_key: VerifyKey<0> = task.vdaf_verify_key().unwrap();
+    let measurement = 13;
+    let aggregation_param = dummy::AggregationParam(7);
+
+    // report_share_0 is a "happy path" report.
+    let report_metadata_0 = ReportMetadata::new(
+        random(),
+        clock
+            .now()
+            .to_batch_interval_start(task.time_precision())
+            .unwrap(),
+        Vec::new(),
+    );
+    let transcript_0 = run_vdaf(
+        vdaf.as_ref(),
+        task.id(),
+        verify_key.as_bytes(),
+        &aggregation_param,
+        report_metadata_0.id(),
+        &measurement,
+    );
+    let helper_prep_state_0 = transcript_0.helper_prepare_transitions[0].prepare_state();
+    let leader_prep_message_0 = &transcript_0.leader_prepare_transitions[1].message;
+    let report_share_0 = generate_helper_report_share::<dummy::Vdaf>(
+        *task.id(),
+        report_metadata_0.clone(),
+        hpke_key.config(),
+        &transcript_0.public_share,
+        Vec::new(),
+        &transcript_0.helper_input_share,
+    );
+
+    // report_share_1 is omitted by the leader's request.
+    let report_metadata_1 = ReportMetadata::new(
+        random(),
+        clock
+            .now()
+            .to_batch_interval_start(task.time_precision())
+            .unwrap(),
+        Vec::new(),
+    );
+    let transcript_1 = run_vdaf(
+        vdaf.as_ref(),
+        task.id(),
+        verify_key.as_bytes(),
+        &aggregation_param,
+        report_metadata_1.id(),
+        &measurement,
+    );
+
+    let helper_prep_state_1 = transcript_1.helper_prepare_transitions[0].prepare_state();
+    let report_share_1 = generate_helper_report_share::<dummy::Vdaf>(
+        *task.id(),
+        report_metadata_1.clone(),
+        hpke_key.config(),
+        &transcript_1.public_share,
+        Vec::new(),
+        &transcript_1.helper_input_share,
+    );
+
+    datastore
+        .run_unnamed_tx(|tx| {
+            let helper_task = helper_task.clone();
+            let report_share_0 = report_share_0.clone();
+            let report_share_1 = report_share_1.clone();
+            let helper_prep_state_0 = *helper_prep_state_0;
+            let helper_prep_state_1 = *helper_prep_state_1;
+            let report_metadata_0 = report_metadata_0.clone();
+            let report_metadata_1 = report_metadata_1.clone();
+
+            Box::pin(async move {
+                tx.put_aggregator_task(&helper_task).await.unwrap();
+
+                tx.put_scrubbed_report(
+                    helper_task.id(),
+                    report_share_0.metadata().id(),
+                    report_share_0.metadata().time(),
+                )
+                .await
+                .unwrap();
+                tx.put_scrubbed_report(
+                    helper_task.id(),
+                    report_share_1.metadata().id(),
+                    report_share_1.metadata().time(),
+                )
+                .await
+                .unwrap();
+
+                tx.put_aggregation_job(&AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
+                    *helper_task.id(),
+                    aggregation_job_id,
+                    aggregation_param,
+                    (),
+                    Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
+                        .unwrap(),
+                    AggregationJobState::AwaitingRequest,
+                    AggregationJobStep::from(0),
+                ))
+                .await
+                .unwrap();
+
+                tx.put_report_aggregation::<0, dummy::Vdaf>(&ReportAggregation::new(
+                    *helper_task.id(),
+                    aggregation_job_id,
+                    *report_metadata_0.id(),
+                    *report_metadata_0.time(),
+                    0,
+                    None,
+                    ReportAggregationState::HelperContinue {
+                        prepare_state: helper_prep_state_0,
+                    },
+                ))
+                .await
+                .unwrap();
+                tx.put_report_aggregation::<0, dummy::Vdaf>(&ReportAggregation::new(
+                    *helper_task.id(),
+                    aggregation_job_id,
+                    *report_metadata_1.id(),
+                    *report_metadata_1.time(),
+                    1,
+                    None,
+                    ReportAggregationState::HelperContinue {
+                        prepare_state: helper_prep_state_1,
+                    },
+                ))
+                .await
+                .unwrap();
+
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+    let request = AggregationJobContinueReq::new(
+        AggregationJobStep::from(1),
+        Vec::from([PrepareContinue::new(
+            *report_metadata_0.id(),
+            leader_prep_message_0.clone(),
+        )]),
+    );
+
+    // Send request, and parse response.
+    let aggregate_resp =
+        post_aggregation_job_and_decode(&task, &aggregation_job_id, &request, &handler).await;
+
+    // Validate response.
+    assert_eq!(aggregate_resp, AggregationJobResp::Processing);
+
+    // Validate datastore.
+    let (aggregation_job, report_aggregations) = datastore
+        .run_unnamed_tx(|tx| {
+            let (vdaf, task) = (Arc::clone(&vdaf), task.clone());
+            Box::pin(async move {
+                let aggregation_job = tx
+                    .get_aggregation_job::<0, TimeInterval, dummy::Vdaf>(
+                        task.id(),
+                        &aggregation_job_id,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let report_aggregations = tx
+                    .get_report_aggregations_for_aggregation_job(
+                        vdaf.as_ref(),
+                        &Role::Helper,
+                        task.id(),
+                        &aggregation_job_id,
+                        &aggregation_param,
+                    )
+                    .await
+                    .unwrap();
+                Ok((aggregation_job, report_aggregations))
+            })
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        aggregation_job,
+        AggregationJob::new(
+            *task.id(),
+            aggregation_job_id,
+            aggregation_param,
+            (),
+            Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
+            AggregationJobState::Active,
+            AggregationJobStep::from(1),
+        )
+        .with_last_request_hash(aggregation_job.last_request_hash().unwrap())
+    );
+    assert_eq!(
+        report_aggregations,
+        Vec::from([
+            ReportAggregation::new(
+                *task.id(),
+                aggregation_job_id,
+                *report_metadata_0.id(),
+                *report_metadata_0.time(),
+                0,
+                None,
+                ReportAggregationState::HelperContinueProcessing {
+                    prepare_state: *helper_prep_state_0,
+                    prepare_continue: PrepareContinue::new(
+                        *report_metadata_0.id(),
+                        leader_prep_message_0.clone()
+                    ),
+                },
+            ),
+            ReportAggregation::new(
+                *task.id(),
+                aggregation_job_id,
+                *report_metadata_1.id(),
+                *report_metadata_1.time(),
+                1,
+                None,
+                ReportAggregationState::Failed {
+                    report_error: ReportError::ReportDropped
+                },
+            ),
+        ])
+    );
+
+    assert_task_aggregation_counter(
+        &datastore,
+        *task.id(),
+        TaskAggregationCounter::new_with_values(0),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn aggregate_continue_accumulate_batch_aggregation() {
     let HttpHandlerTest {
         ephemeral_datastore: _ephemeral_datastore,
@@ -383,7 +648,12 @@ async fn aggregate_continue_accumulate_batch_aggregation() {
         ..
     } = HttpHandlerTest::new().await;
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 }).build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .build();
     let helper_task = task.helper_view().unwrap();
     let aggregation_job_id_0 = random();
     let aggregation_job_id_1 = random();
@@ -525,52 +795,58 @@ async fn aggregate_continue_accumulate_batch_aggregation() {
 
     datastore
         .run_unnamed_tx(|tx| {
-            let task = helper_task.clone();
-            let (report_share_0, report_share_1, report_share_2) = (
-                report_share_0.clone(),
-                report_share_1.clone(),
-                report_share_2.clone(),
-            );
-            let (helper_prep_state_0, helper_prep_state_1, helper_prep_state_2) = (
-                *helper_prep_state_0,
-                *helper_prep_state_1,
-                *helper_prep_state_2,
-            );
-            let (report_metadata_0, report_metadata_1, report_metadata_2) = (
-                report_metadata_0.clone(),
-                report_metadata_1.clone(),
-                report_metadata_2.clone(),
-            );
+            let helper_task = helper_task.clone();
+            let report_share_0 = report_share_0.clone();
+            let report_share_1 = report_share_1.clone();
+            let report_share_2 = report_share_2.clone();
+            let helper_prep_state_0 = *helper_prep_state_0;
+            let helper_prep_state_1 = *helper_prep_state_1;
+            let helper_prep_state_2 = *helper_prep_state_2;
+            let report_metadata_0 = report_metadata_0.clone();
+            let report_metadata_1 = report_metadata_1.clone();
+            let report_metadata_2 = report_metadata_2.clone();
             let second_batch_want_batch_aggregations = second_batch_want_batch_aggregations.clone();
 
             Box::pin(async move {
-                tx.put_aggregator_task(&task).await.unwrap();
+                tx.put_aggregator_task(&helper_task).await.unwrap();
 
-                tx.put_scrubbed_report(task.id(), &report_share_0)
-                    .await
-                    .unwrap();
-                tx.put_scrubbed_report(task.id(), &report_share_1)
-                    .await
-                    .unwrap();
-                tx.put_scrubbed_report(task.id(), &report_share_2)
-                    .await
-                    .unwrap();
+                tx.put_scrubbed_report(
+                    helper_task.id(),
+                    report_share_0.metadata().id(),
+                    report_share_0.metadata().time(),
+                )
+                .await
+                .unwrap();
+                tx.put_scrubbed_report(
+                    helper_task.id(),
+                    report_share_1.metadata().id(),
+                    report_share_1.metadata().time(),
+                )
+                .await
+                .unwrap();
+                tx.put_scrubbed_report(
+                    helper_task.id(),
+                    report_share_2.metadata().id(),
+                    report_share_2.metadata().time(),
+                )
+                .await
+                .unwrap();
 
                 tx.put_aggregation_job(&AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id_0,
                     aggregation_param,
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
                 .unwrap();
 
                 tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id_0,
                     *report_metadata_0.id(),
                     *report_metadata_0.time(),
@@ -583,7 +859,7 @@ async fn aggregate_continue_accumulate_batch_aggregation() {
                 .await
                 .unwrap();
                 tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id_0,
                     *report_metadata_1.id(),
                     *report_metadata_1.time(),
@@ -596,7 +872,7 @@ async fn aggregate_continue_accumulate_batch_aggregation() {
                 .await
                 .unwrap();
                 tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id_0,
                     *report_metadata_2.id(),
                     *report_metadata_2.time(),
@@ -610,7 +886,7 @@ async fn aggregate_continue_accumulate_batch_aggregation() {
                 .unwrap();
 
                 tx.put_batch_aggregation(&BatchAggregation::<0, TimeInterval, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     first_batch_identifier,
                     aggregation_param,
                     0,
@@ -836,49 +1112,55 @@ async fn aggregate_continue_accumulate_batch_aggregation() {
 
     datastore
         .run_unnamed_tx(|tx| {
-            let task = helper_task.clone();
-            let (report_share_3, report_share_4, report_share_5) = (
-                report_share_3.clone(),
-                report_share_4.clone(),
-                report_share_5.clone(),
-            );
-            let (helper_prep_state_3, helper_prep_state_4, helper_prep_state_5) = (
-                *helper_prep_state_3,
-                *helper_prep_state_4,
-                *helper_prep_state_5,
-            );
-            let (report_metadata_3, report_metadata_4, report_metadata_5) = (
-                report_metadata_3.clone(),
-                report_metadata_4.clone(),
-                report_metadata_5.clone(),
-            );
+            let helper_task = helper_task.clone();
+            let report_share_3 = report_share_3.clone();
+            let report_share_4 = report_share_4.clone();
+            let report_share_5 = report_share_5.clone();
+            let helper_prep_state_3 = *helper_prep_state_3;
+            let helper_prep_state_4 = *helper_prep_state_4;
+            let helper_prep_state_5 = *helper_prep_state_5;
+            let report_metadata_3 = report_metadata_3.clone();
+            let report_metadata_4 = report_metadata_4.clone();
+            let report_metadata_5 = report_metadata_5.clone();
 
             Box::pin(async move {
-                tx.put_scrubbed_report(task.id(), &report_share_3)
-                    .await
-                    .unwrap();
-                tx.put_scrubbed_report(task.id(), &report_share_4)
-                    .await
-                    .unwrap();
-                tx.put_scrubbed_report(task.id(), &report_share_5)
-                    .await
-                    .unwrap();
+                tx.put_scrubbed_report(
+                    helper_task.id(),
+                    report_share_3.metadata().id(),
+                    report_share_3.metadata().time(),
+                )
+                .await
+                .unwrap();
+                tx.put_scrubbed_report(
+                    helper_task.id(),
+                    report_share_4.metadata().id(),
+                    report_share_4.metadata().time(),
+                )
+                .await
+                .unwrap();
+                tx.put_scrubbed_report(
+                    helper_task.id(),
+                    report_share_5.metadata().id(),
+                    report_share_5.metadata().time(),
+                )
+                .await
+                .unwrap();
 
                 tx.put_aggregation_job(&AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id_1,
                     aggregation_param,
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
                 .unwrap();
 
                 tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id_1,
                     *report_metadata_3.id(),
                     *report_metadata_3.time(),
@@ -891,7 +1173,7 @@ async fn aggregate_continue_accumulate_batch_aggregation() {
                 .await
                 .unwrap();
                 tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id_1,
                     *report_metadata_4.id(),
                     *report_metadata_4.time(),
@@ -904,7 +1186,7 @@ async fn aggregate_continue_accumulate_batch_aggregation() {
                 .await
                 .unwrap();
                 tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id_1,
                     *report_metadata_5.id(),
                     *report_metadata_5.time(),
@@ -1049,7 +1331,12 @@ async fn aggregate_continue_leader_sends_non_continue_or_finish_transition() {
     } = HttpHandlerTest::new().await;
 
     // Prepare parameters.
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 }).build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .build();
     let helper_task = task.helper_view().unwrap();
     let report_id = random();
     let aggregation_param = dummy::AggregationParam(7);
@@ -1071,43 +1358,34 @@ async fn aggregate_continue_leader_sends_non_continue_or_finish_transition() {
     // Setup datastore.
     datastore
         .run_unnamed_tx(|tx| {
-            let (task, aggregation_param, report_metadata, transcript) = (
-                helper_task.clone(),
-                aggregation_param,
-                report_metadata.clone(),
-                transcript.clone(),
-            );
+            let helper_task = helper_task.clone();
+            let report_metadata = report_metadata.clone();
+            let transcript = transcript.clone();
+
             Box::pin(async move {
-                tx.put_aggregator_task(&task).await.unwrap();
+                tx.put_aggregator_task(&helper_task).await.unwrap();
                 tx.put_scrubbed_report(
-                    task.id(),
-                    &ReportShare::new(
-                        report_metadata.clone(),
-                        Vec::from("public share"),
-                        HpkeCiphertext::new(
-                            HpkeConfigId::from(42),
-                            Vec::from("012345"),
-                            Vec::from("543210"),
-                        ),
-                    ),
+                    helper_task.id(),
+                    report_metadata.id(),
+                    report_metadata.time(),
                 )
                 .await
                 .unwrap();
 
                 tx.put_aggregation_job(&AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     aggregation_param,
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
                 .unwrap();
                 tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     *report_metadata.id(),
                     *report_metadata.time(),
@@ -1167,7 +1445,12 @@ async fn aggregate_continue_prep_step_fails() {
     } = HttpHandlerTest::new().await;
 
     // Prepare parameters.
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 }).build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .build();
     let helper_task = task.helper_view().unwrap();
     let vdaf = dummy::Vdaf::new(2);
     let report_id = random();
@@ -1195,33 +1478,34 @@ async fn aggregate_continue_prep_step_fails() {
     // Setup datastore.
     datastore
         .run_unnamed_tx(|tx| {
-            let (task, aggregation_param, report_metadata, transcript, helper_report_share) = (
-                helper_task.clone(),
-                aggregation_param,
-                report_metadata.clone(),
-                transcript.clone(),
-                helper_report_share.clone(),
-            );
+            let helper_task = helper_task.clone();
+            let report_metadata = report_metadata.clone();
+            let transcript = transcript.clone();
+            let helper_report_share = helper_report_share.clone();
 
             Box::pin(async move {
-                tx.put_aggregator_task(&task).await.unwrap();
-                tx.put_scrubbed_report(task.id(), &helper_report_share)
-                    .await
-                    .unwrap();
+                tx.put_aggregator_task(&helper_task).await.unwrap();
+                tx.put_scrubbed_report(
+                    helper_task.id(),
+                    helper_report_share.metadata().id(),
+                    helper_report_share.metadata().time(),
+                )
+                .await
+                .unwrap();
                 tx.put_aggregation_job(&AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     aggregation_param,
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
                 .unwrap();
                 tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     *report_metadata.id(),
                     *report_metadata.time(),
@@ -1342,7 +1626,12 @@ async fn aggregate_continue_unexpected_transition() {
     } = HttpHandlerTest::new().await;
 
     // Prepare parameters.
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 }).build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .build();
     let helper_task = task.helper_view().unwrap();
     let report_id = random();
     let aggregation_param = dummy::AggregationParam(7);
@@ -1361,43 +1650,33 @@ async fn aggregate_continue_unexpected_transition() {
     // Setup datastore.
     datastore
         .run_unnamed_tx(|tx| {
-            let (task, aggregation_param, report_metadata, transcript) = (
-                helper_task.clone(),
-                aggregation_param,
-                report_metadata.clone(),
-                transcript.clone(),
-            );
+            let helper_task = helper_task.clone();
+            let report_metadata = report_metadata.clone();
+            let transcript = transcript.clone();
 
             Box::pin(async move {
-                tx.put_aggregator_task(&task).await.unwrap();
+                tx.put_aggregator_task(&helper_task).await.unwrap();
                 tx.put_scrubbed_report(
-                    task.id(),
-                    &ReportShare::new(
-                        report_metadata.clone(),
-                        Vec::from("PUBLIC"),
-                        HpkeCiphertext::new(
-                            HpkeConfigId::from(42),
-                            Vec::from("012345"),
-                            Vec::from("543210"),
-                        ),
-                    ),
+                    helper_task.id(),
+                    report_metadata.id(),
+                    report_metadata.time(),
                 )
                 .await
                 .unwrap();
                 tx.put_aggregation_job(&AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     aggregation_param,
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
                 .unwrap();
                 tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     *report_metadata.id(),
                     *report_metadata.time(),
@@ -1457,7 +1736,12 @@ async fn aggregate_continue_out_of_order_transition() {
     } = HttpHandlerTest::new().await;
 
     // Prepare parameters.
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 }).build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .build();
     let helper_task = task.helper_view().unwrap();
     let report_id_0 = random();
     let aggregation_param = dummy::AggregationParam(7);
@@ -1493,69 +1777,45 @@ async fn aggregate_continue_out_of_order_transition() {
     // Setup datastore.
     datastore
         .run_unnamed_tx(|tx| {
-            let (
-                task,
-                aggregation_param,
-                report_metadata_0,
-                report_metadata_1,
-                transcript_0,
-                transcript_1,
-            ) = (
-                helper_task.clone(),
-                aggregation_param,
-                report_metadata_0.clone(),
-                report_metadata_1.clone(),
-                transcript_0.clone(),
-                transcript_1.clone(),
-            );
+            let helper_task = helper_task.clone();
+            let report_metadata_0 = report_metadata_0.clone();
+            let report_metadata_1 = report_metadata_1.clone();
+            let transcript_0 = transcript_0.clone();
+            let transcript_1 = transcript_1.clone();
 
             Box::pin(async move {
-                tx.put_aggregator_task(&task).await.unwrap();
+                tx.put_aggregator_task(&helper_task).await.unwrap();
 
                 tx.put_scrubbed_report(
-                    task.id(),
-                    &ReportShare::new(
-                        report_metadata_0.clone(),
-                        Vec::from("public"),
-                        HpkeCiphertext::new(
-                            HpkeConfigId::from(42),
-                            Vec::from("012345"),
-                            Vec::from("543210"),
-                        ),
-                    ),
+                    helper_task.id(),
+                    report_metadata_0.id(),
+                    report_metadata_0.time(),
                 )
                 .await
                 .unwrap();
                 tx.put_scrubbed_report(
-                    task.id(),
-                    &ReportShare::new(
-                        report_metadata_1.clone(),
-                        Vec::from("public"),
-                        HpkeCiphertext::new(
-                            HpkeConfigId::from(42),
-                            Vec::from("012345"),
-                            Vec::from("543210"),
-                        ),
-                    ),
+                    helper_task.id(),
+                    report_metadata_1.id(),
+                    report_metadata_1.time(),
                 )
                 .await
                 .unwrap();
 
                 tx.put_aggregation_job(&AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     aggregation_param,
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
                 .unwrap();
 
                 tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     *report_metadata_0.id(),
                     *report_metadata_0.time(),
@@ -1568,7 +1828,7 @@ async fn aggregate_continue_out_of_order_transition() {
                 .await
                 .unwrap();
                 tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     *report_metadata_1.id(),
                     *report_metadata_1.time(),
@@ -1635,7 +1895,12 @@ async fn aggregate_continue_for_non_waiting_aggregation() {
     } = HttpHandlerTest::new().await;
 
     // Prepare parameters.
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 }).build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 1 },
+    )
+    .build();
     let helper_task = task.helper_view().unwrap();
     let aggregation_job_id = random();
     let report_metadata = ReportMetadata::new(
@@ -1647,37 +1912,32 @@ async fn aggregate_continue_for_non_waiting_aggregation() {
     // Setup datastore.
     datastore
         .run_unnamed_tx(|tx| {
-            let (task, report_metadata) = (helper_task.clone(), report_metadata.clone());
+            let helper_task = helper_task.clone();
+            let report_metadata = report_metadata.clone();
+
             Box::pin(async move {
-                tx.put_aggregator_task(&task).await.unwrap();
+                tx.put_aggregator_task(&helper_task).await.unwrap();
                 tx.put_scrubbed_report(
-                    task.id(),
-                    &ReportShare::new(
-                        report_metadata.clone(),
-                        Vec::from("public share"),
-                        HpkeCiphertext::new(
-                            HpkeConfigId::from(42),
-                            Vec::from("012345"),
-                            Vec::from("543210"),
-                        ),
-                    ),
+                    helper_task.id(),
+                    report_metadata.id(),
+                    report_metadata.time(),
                 )
                 .await
                 .unwrap();
                 tx.put_aggregation_job(&AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     dummy::AggregationParam(0),
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
                 .unwrap();
                 tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
-                    *task.id(),
+                    *helper_task.id(),
                     aggregation_job_id,
                     *report_metadata.id(),
                     *report_metadata.time(),

@@ -5,7 +5,7 @@ use crate::{
     common::{build_test_task, submit_measurements_and_verify_aggregate, TestContext},
     initialize_rustls,
 };
-use janus_aggregator_core::task::{test_util::TaskBuilder, BatchMode};
+use janus_aggregator_core::task::{test_util::TaskBuilder, AggregationMode, BatchMode};
 use janus_core::{
     test_util::install_test_trace_subscriber,
     vdaf::{vdaf_dp_strategies, VdafInstance},
@@ -20,7 +20,7 @@ use std::time::Duration;
 
 async fn run_divviup_ts_integration_test(test_name: &str, vdaf: VdafInstance) {
     let (task_parameters, task_builder) = build_test_task(
-        TaskBuilder::new(BatchMode::TimeInterval, vdaf),
+        TaskBuilder::new(BatchMode::TimeInterval, AggregationMode::Synchronous, vdaf),
         TestContext::VirtualNetwork,
         Duration::from_millis(500),
         Duration::from_secs(60),

@@ -198,7 +198,7 @@ impl PeerAggregatorCache {
         // so a linear search should be fine.
         self.peers
             .iter()
-            .find(|peer| peer.endpoint() == endpoint && peer.role() == role)
+            .find(|peer| peer.endpoint() == endpoint && peer.peer_role() == role)
     }
 }
 
@@ -276,7 +276,7 @@ mod tests {
 
     use janus_aggregator_core::{
         datastore::{models::HpkeKeyState, test_util::ephemeral_datastore},
-        task::{test_util::TaskBuilder, BatchMode},
+        task::{test_util::TaskBuilder, AggregationMode, BatchMode},
     };
     use janus_core::{
         hpke::HpkeKeypair,
@@ -352,10 +352,14 @@ mod tests {
             ttl,
         );
 
-        let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-            .build()
-            .leader_view()
-            .unwrap();
+        let task = TaskBuilder::new(
+            BatchMode::TimeInterval,
+            AggregationMode::Synchronous,
+            VdafInstance::Prio3Count,
+        )
+        .build()
+        .leader_view()
+        .unwrap();
 
         assert!(task_aggregators.get(task.id()).await.unwrap().is_none());
         // We shouldn't have cached that last call.
@@ -417,10 +421,14 @@ mod tests {
             ttl,
         );
 
-        let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-            .build()
-            .leader_view()
-            .unwrap();
+        let task = TaskBuilder::new(
+            BatchMode::TimeInterval,
+            AggregationMode::Synchronous,
+            VdafInstance::Prio3Count,
+        )
+        .build()
+        .leader_view()
+        .unwrap();
 
         assert!(task_aggregators.get(task.id()).await.unwrap().is_none());
 

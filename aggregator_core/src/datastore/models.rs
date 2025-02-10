@@ -15,8 +15,8 @@ use janus_core::{
 use janus_messages::{
     batch_mode::{BatchMode, LeaderSelected, TimeInterval},
     AggregationJobId, AggregationJobStep, BatchId, CollectionJobId, Duration, Extension,
-    HpkeCiphertext, HpkeConfigId, Interval, PrepareResp, Query, ReportError, ReportId,
-    ReportIdChecksum, ReportMetadata, Role, TaskId, Time,
+    HpkeCiphertext, HpkeConfigId, Interval, PrepareContinue, PrepareInit, PrepareResp, Query,
+    ReportError, ReportId, ReportIdChecksum, ReportMetadata, Role, TaskId, Time,
 };
 use postgres_protocol::types::{
     range_from_sql, range_to_sql, timestamp_from_sql, timestamp_to_sql, Range, RangeBound,
@@ -538,8 +538,10 @@ where
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, ToSql, FromSql)]
 #[postgres(name = "aggregation_job_state")]
 pub enum AggregationJobState {
-    #[postgres(name = "IN_PROGRESS")]
-    InProgress,
+    #[postgres(name = "ACTIVE")]
+    Active,
+    #[postgres(name = "AWAITING_REQUEST")]
+    AwaitingRequest,
     #[postgres(name = "FINISHED")]
     Finished,
     #[postgres(name = "ABANDONED")]
@@ -952,17 +954,36 @@ pub enum ReportAggregationState<const SEED_SIZE: usize, A: vdaf::Aggregator<SEED
     /// continuation request, and is ready to poll for completion.
     LeaderPoll {
         /// Leader's current aggregation state.
+        #[educe(Debug(ignore))]
         leader_state: PingPongState<SEED_SIZE, 16, A>,
     },
 
     //
     // Helper-only states.
     //
+    /// The Helper has received an aggregation initialization request from the Leader, and is
+    /// processing it asynchronously.
+    HelperInitProcessing {
+        /// The initialization message received for this report aggregation.
+        prepare_init: PrepareInit,
+        /// Does this report aggregation require the taskprov extension?
+        require_taskbind_extension: bool,
+    },
     /// The Helper is ready to receive an aggregation continuation request from the Leader.
     HelperContinue {
         /// Helper's current preparation state
         #[educe(Debug(ignore))]
         prepare_state: A::PrepareState,
+    },
+    /// The Helper has received an aggregation continuation request from the Leader, and is
+    /// processing it asynchronously.
+    HelperContinueProcessing {
+        /// Helper's current preparation state.
+        #[educe(Debug(ignore))]
+        prepare_state: A::PrepareState,
+        /// The message from the Leader for this report aggregation.
+        #[educe(Debug(ignore))]
+        prepare_continue: PrepareContinue,
     },
 
     //
@@ -980,9 +1001,17 @@ impl<const SEED_SIZE: usize, A: vdaf::Aggregator<SEED_SIZE, 16>>
     pub(super) fn state_code(&self) -> ReportAggregationStateCode {
         match self {
             ReportAggregationState::LeaderInit { .. } => ReportAggregationStateCode::Init,
-            ReportAggregationState::LeaderContinue { .. }
-            | ReportAggregationState::HelperContinue { .. } => ReportAggregationStateCode::Continue,
+            ReportAggregationState::LeaderContinue { .. } => ReportAggregationStateCode::Continue,
             ReportAggregationState::LeaderPoll { .. } => ReportAggregationStateCode::Poll,
+
+            ReportAggregationState::HelperInitProcessing { .. } => {
+                ReportAggregationStateCode::InitProcessing
+            }
+            ReportAggregationState::HelperContinue { .. } => ReportAggregationStateCode::Continue,
+            ReportAggregationState::HelperContinueProcessing { .. } => {
+                ReportAggregationStateCode::ContinueProcessing
+            }
+
             ReportAggregationState::Finished => ReportAggregationStateCode::Finished,
             ReportAggregationState::Failed { .. } => ReportAggregationStateCode::Failed,
         }
@@ -1046,6 +1075,15 @@ impl<const SEED_SIZE: usize, A: vdaf::Aggregator<SEED_SIZE, 16>>
                 }
             }
 
+            ReportAggregationState::HelperInitProcessing {
+                prepare_init,
+                require_taskbind_extension,
+            } => EncodedReportAggregationStateValues {
+                prepare_init: Some(prepare_init.get_encoded()?),
+                require_taskbind_extension: Some(*require_taskbind_extension),
+                ..Default::default()
+            },
+
             ReportAggregationState::HelperContinue { prepare_state } => {
                 EncodedReportAggregationStateValues {
                     helper_prep_state: Some(prepare_state.get_encoded()?),
@@ -1053,7 +1091,17 @@ impl<const SEED_SIZE: usize, A: vdaf::Aggregator<SEED_SIZE, 16>>
                 }
             }
 
+            ReportAggregationState::HelperContinueProcessing {
+                prepare_state,
+                prepare_continue,
+            } => EncodedReportAggregationStateValues {
+                helper_prep_state: Some(prepare_state.get_encoded()?),
+                prepare_continue: Some(prepare_continue.get_encoded()?),
+                ..Default::default()
+            },
+
             ReportAggregationState::Finished => EncodedReportAggregationStateValues::default(),
+
             ReportAggregationState::Failed { report_error } => {
                 EncodedReportAggregationStateValues {
                     report_error: Some(*report_error as i16),
@@ -1080,8 +1128,15 @@ pub(super) struct EncodedReportAggregationStateValues {
     pub(super) leader_prep_state: Option<Vec<u8>>,
     pub(super) leader_output_share: Option<Vec<u8>>,
 
-    // State for HelperContinue.
+    // State for HelperInitProcessing.
+    pub(super) prepare_init: Option<Vec<u8>>,
+    pub(super) require_taskbind_extension: Option<bool>,
+
+    // State for HelperContinue & HelperContinueProcessing.
     pub(super) helper_prep_state: Option<Vec<u8>>,
+
+    // State for HelperContinueProcessing.
+    pub(super) prepare_continue: Option<Vec<u8>>,
 
     // State for Failed.
     pub(super) report_error: Option<i16>,
@@ -1095,8 +1150,12 @@ pub(super) struct EncodedReportAggregationStateValues {
 pub(super) enum ReportAggregationStateCode {
     #[postgres(name = "INIT")]
     Init,
+    #[postgres(name = "INIT_PROCESSING")]
+    InitProcessing,
     #[postgres(name = "CONTINUE")]
     Continue,
+    #[postgres(name = "CONTINUE_PROCESSING")]
+    ContinueProcessing,
     #[postgres(name = "POLL")]
     Poll,
     #[postgres(name = "FINISHED")]
@@ -1172,6 +1231,20 @@ where
             },
 
             (
+                Self::HelperInitProcessing {
+                    prepare_init: lhs_prepare_init,
+                    require_taskbind_extension: lhs_require_taskbind_extension,
+                },
+                Self::HelperInitProcessing {
+                    prepare_init: rhs_prepare_init,
+                    require_taskbind_extension: rhs_require_taskbind_extension,
+                },
+            ) => {
+                lhs_prepare_init == rhs_prepare_init
+                    && lhs_require_taskbind_extension == rhs_require_taskbind_extension
+            }
+
+            (
                 Self::HelperContinue {
                     prepare_state: lhs_state,
                 },
@@ -1179,6 +1252,17 @@ where
                     prepare_state: rhs_state,
                 },
             ) => lhs_state == rhs_state,
+
+            (
+                Self::HelperContinueProcessing {
+                    prepare_state: lhs_state,
+                    prepare_continue: lhs_prepare_continue,
+                },
+                Self::HelperContinueProcessing {
+                    prepare_state: rhs_state,
+                    prepare_continue: rhs_prepare_continue,
+                },
+            ) => lhs_state == rhs_state && lhs_prepare_continue == rhs_prepare_continue,
 
             (
                 Self::Failed {

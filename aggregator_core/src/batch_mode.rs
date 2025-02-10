@@ -429,7 +429,7 @@ impl CollectableBatchMode for LeaderSelected {
 mod tests {
     use crate::{
         batch_mode::CollectableBatchMode,
-        task::{test_util::TaskBuilder, BatchMode},
+        task::{test_util::TaskBuilder, AggregationMode, BatchMode},
     };
     use janus_core::vdaf::VdafInstance;
     use janus_messages::{batch_mode::TimeInterval, Duration, Interval, Time};
@@ -437,11 +437,15 @@ mod tests {
     #[test]
     fn validate_collect_identifier() {
         let time_precision_secs = 3600;
-        let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-            .with_time_precision(Duration::from_seconds(time_precision_secs))
-            .build()
-            .leader_view()
-            .unwrap();
+        let task = TaskBuilder::new(
+            BatchMode::TimeInterval,
+            AggregationMode::Synchronous,
+            VdafInstance::Fake { rounds: 1 },
+        )
+        .with_time_precision(Duration::from_seconds(time_precision_secs))
+        .build()
+        .leader_view()
+        .unwrap();
 
         struct TestCase {
             name: &'static str,

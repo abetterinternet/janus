@@ -3,7 +3,10 @@ use http::header::CONTENT_TYPE;
 use janus_aggregator::aggregator::http_handlers::AggregatorHandlerBuilder;
 use janus_aggregator_core::{
     datastore::{models::HpkeKeyState, test_util::ephemeral_datastore},
-    task::test_util::{Task, TaskBuilder},
+    task::{
+        test_util::{Task, TaskBuilder},
+        AggregationMode,
+    },
     test_util::noop_meter,
 };
 use janus_core::{
@@ -12,7 +15,7 @@ use janus_core::{
     retries::retry_http_request,
     test_util::{install_test_trace_subscriber, runtime::TestRuntime},
     time::{Clock, RealClock, TimeExt},
-    vdaf::{vdaf_application_context, vdaf_dp_strategies, VdafInstance, VERIFY_KEY_LENGTH},
+    vdaf::{vdaf_application_context, vdaf_dp_strategies, VdafInstance, VERIFY_KEY_LENGTH_PRIO3},
 };
 use janus_messages::{
     HpkeConfig, HpkeConfigList, InputShareAad, PlaintextInputShare, Report, ReportId,
@@ -131,8 +134,8 @@ fn shard_encoded_measurement(
     encoded_measurement: Vec<Field128>,
     report_id: ReportId,
 ) -> (
-    Prio3PublicShare<VERIFY_KEY_LENGTH>,
-    Vec<Prio3InputShare<Field128, VERIFY_KEY_LENGTH>>,
+    Prio3PublicShare<VERIFY_KEY_LENGTH_PRIO3>,
+    Vec<Prio3InputShare<Field128, VERIFY_KEY_LENGTH_PRIO3>>,
 ) {
     const DST_MEASUREMENT_SHARE: u16 = 1;
     const DST_PROOF_SHARE: u16 = 2;
@@ -155,7 +158,7 @@ fn shard_encoded_measurement(
         Histogram::new(MAX_REPORTS, chunk_length).unwrap();
 
     // Share measurement.
-    let helper_share_seed = rng.gen::<Seed<VERIFY_KEY_LENGTH>>();
+    let helper_share_seed = rng.gen::<Seed<VERIFY_KEY_LENGTH_PRIO3>>();
     let mut helper_measurement_share_rng = XofTurboShake128::seed_stream(
         helper_share_seed.as_ref(),
         &[&domain_separation_tag(vdaf, DST_MEASUREMENT_SHARE), &ctx],
@@ -171,7 +174,7 @@ fn shard_encoded_measurement(
     }
 
     // Derive joint randomness.
-    let helper_joint_rand_blind = rng.gen::<Seed<VERIFY_KEY_LENGTH>>();
+    let helper_joint_rand_blind = rng.gen::<Seed<VERIFY_KEY_LENGTH_PRIO3>>();
     let mut helper_joint_rand_part_xof = XofTurboShake128::init(
         helper_joint_rand_blind.as_ref(),
         &[&domain_separation_tag(vdaf, DST_JOINT_RAND_PART), &ctx],
@@ -183,7 +186,7 @@ fn shard_encoded_measurement(
     }
     let helper_joint_rand_seed_part = helper_joint_rand_part_xof.into_seed();
 
-    let leader_joint_rand_blind = rng.gen::<Seed<VERIFY_KEY_LENGTH>>();
+    let leader_joint_rand_blind = rng.gen::<Seed<VERIFY_KEY_LENGTH_PRIO3>>();
     let mut leader_joint_rand_part_xof = XofTurboShake128::init(
         leader_joint_rand_blind.as_ref(),
         &[&domain_separation_tag(vdaf, DST_JOINT_RAND_PART), &ctx],
@@ -196,7 +199,7 @@ fn shard_encoded_measurement(
     let leader_joint_rand_seed_part = leader_joint_rand_part_xof.into_seed();
 
     let mut joint_rand_seed_xof = XofTurboShake128::init(
-        &[0; VERIFY_KEY_LENGTH],
+        &[0; VERIFY_KEY_LENGTH_PRIO3],
         &[&domain_separation_tag(vdaf, DST_JOINT_RAND_SEED), &ctx],
     );
     joint_rand_seed_xof.update(leader_joint_rand_seed_part.as_ref());
@@ -281,8 +284,8 @@ fn domain_separation_tag(vdaf: &impl Vdaf, usage: u16) -> [u8; 8] {
 async fn prepare_report(
     http_client: &reqwest::Client,
     task: &Task,
-    public_share: Prio3PublicShare<VERIFY_KEY_LENGTH>,
-    input_shares: Vec<Prio3InputShare<Field128, VERIFY_KEY_LENGTH>>,
+    public_share: Prio3PublicShare<VERIFY_KEY_LENGTH_PRIO3>,
+    input_shares: Vec<Prio3InputShare<Field128, VERIFY_KEY_LENGTH_PRIO3>>,
     report_id: ReportId,
     report_time: Time,
 ) -> Result<Report, janus_client::Error> {
@@ -402,6 +405,7 @@ async fn bad_client_report_validity() {
     };
     let task = TaskBuilder::new(
         janus_aggregator_core::task::BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
         vdaf_instance,
     )
     .with_leader_aggregator_endpoint(format!("http://{socket_address}/").parse().unwrap())
@@ -482,7 +486,7 @@ fn shard_encoded_measurement_correct() {
     let (public_share, input_shares) =
         shard_encoded_measurement(&vdaf, &task_id, encoded_measurement, report_id);
 
-    let verify_key: [u8; VERIFY_KEY_LENGTH] = random();
+    let verify_key: [u8; VERIFY_KEY_LENGTH_PRIO3] = random();
     let ctx = vdaf_application_context(&task_id);
     let (leader_prepare_state, leader_prepare_share) = vdaf
         .prepare_init(

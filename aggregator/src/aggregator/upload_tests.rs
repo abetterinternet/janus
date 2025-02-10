@@ -13,7 +13,7 @@ use janus_aggregator_core::{
     },
     task::{
         test_util::{Task, TaskBuilder},
-        BatchMode,
+        AggregationMode, BatchMode,
     },
     test_util::noop_meter,
 };
@@ -24,7 +24,7 @@ use janus_core::{
         runtime::{TestRuntime, TestRuntimeManager},
     },
     time::{Clock, MockClock, TimeExt},
-    vdaf::{VdafInstance, VERIFY_KEY_LENGTH},
+    vdaf::{VdafInstance, VERIFY_KEY_LENGTH_PRIO3},
     Runtime,
 };
 use janus_messages::{
@@ -58,7 +58,12 @@ impl UploadTest {
 
         let clock = MockClock::default();
         let vdaf = Prio3Count::new_count(2).unwrap();
-        let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count).build();
+        let task = TaskBuilder::new(
+            BatchMode::TimeInterval,
+            AggregationMode::Synchronous,
+            VdafInstance::Prio3Count,
+        )
+        .build();
 
         let leader_task = task.leader_view().unwrap();
 
@@ -446,16 +451,18 @@ async fn upload_report_for_collected_batch() {
         .run_unnamed_tx(|tx| {
             let task = task.clone();
             Box::pin(async move {
-                tx.put_collection_job(
-                    &CollectionJob::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>::new(
-                        *task.id(),
-                        random(),
-                        Query::new_time_interval(batch_interval),
-                        (),
-                        batch_interval,
-                        CollectionJobState::Start,
-                    ),
-                )
+                tx.put_collection_job(&CollectionJob::<
+                    VERIFY_KEY_LENGTH_PRIO3,
+                    TimeInterval,
+                    Prio3Count,
+                >::new(
+                    *task.id(),
+                    random(),
+                    Query::new_time_interval(batch_interval),
+                    (),
+                    batch_interval,
+                    CollectionJobState::Start,
+                ))
                 .await
             })
         })
@@ -514,13 +521,17 @@ async fn upload_report_task_not_started() {
     .await;
 
     // Set the task start time to the future, and generate & upload a report from before that time.
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-        .with_task_start(Some(
-            clock.now().add(&Duration::from_seconds(3600)).unwrap(),
-        ))
-        .build()
-        .leader_view()
-        .unwrap();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .with_task_start(Some(
+        clock.now().add(&Duration::from_seconds(3600)).unwrap(),
+    ))
+    .build()
+    .leader_view()
+    .unwrap();
     datastore.put_aggregator_task(&task).await.unwrap();
 
     let report = create_report(&task, &hpke_keypair, clock.now());
@@ -576,11 +587,15 @@ async fn upload_report_task_ended() {
     )
     .await;
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-        .with_task_end(Some(clock.now()))
-        .build()
-        .leader_view()
-        .unwrap();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .with_task_end(Some(clock.now()))
+    .build()
+    .leader_view()
+    .unwrap();
     datastore.put_aggregator_task(&task).await.unwrap();
 
     // Advance the clock to end the task.
@@ -638,11 +653,15 @@ async fn upload_report_report_expired() {
     )
     .await;
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-        .with_report_expiry_age(Some(Duration::from_seconds(60)))
-        .build()
-        .leader_view()
-        .unwrap();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .with_report_expiry_age(Some(Duration::from_seconds(60)))
+    .build()
+    .leader_view()
+    .unwrap();
     datastore.put_aggregator_task(&task).await.unwrap();
 
     let report = create_report(&task, &hpke_keypair, clock.now());

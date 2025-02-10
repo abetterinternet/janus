@@ -2,7 +2,7 @@ use crate::{
     common::{build_test_task, submit_measurements_and_verify_aggregate, TestContext},
     initialize_rustls,
 };
-use janus_aggregator_core::task::{test_util::TaskBuilder, BatchMode};
+use janus_aggregator_core::task::{test_util::TaskBuilder, AggregationMode, BatchMode};
 use janus_core::{test_util::install_test_trace_subscriber, vdaf::VdafInstance};
 #[cfg(feature = "testcontainer")]
 use janus_integration_tests::janus::JanusContainer;
@@ -27,7 +27,11 @@ async fn daphne_janus() {
     // Start servers.
     let network = generate_network_name();
     let (mut task_parameters, task_builder) = build_test_task(
-        TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count),
+        TaskBuilder::new(
+            BatchMode::TimeInterval,
+            AggregationMode::Synchronous,
+            VdafInstance::Prio3Count,
+        ),
         TestContext::VirtualNetwork,
         Duration::from_millis(500),
         Duration::from_secs(60),
@@ -69,7 +73,11 @@ async fn janus_daphne() {
     // Start servers.
     let network = generate_network_name();
     let (mut task_parameters, task_builder) = build_test_task(
-        TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count),
+        TaskBuilder::new(
+            BatchMode::TimeInterval,
+            AggregationMode::Synchronous,
+            VdafInstance::Prio3Count,
+        ),
         TestContext::VirtualNetwork,
         Duration::from_millis(500),
         Duration::from_secs(60),
@@ -111,7 +119,11 @@ async fn janus_in_process_daphne() {
     // Start servers.
     let network = generate_network_name();
     let (mut task_parameters, mut task_builder) = build_test_task(
-        TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count),
+        TaskBuilder::new(
+            BatchMode::TimeInterval,
+            AggregationMode::Synchronous,
+            VdafInstance::Prio3Count,
+        ),
         TestContext::VirtualNetwork,
         Duration::from_millis(500),
         Duration::from_secs(60),

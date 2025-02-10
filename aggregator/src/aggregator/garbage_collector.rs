@@ -182,7 +182,7 @@ mod tests {
             },
             test_util::ephemeral_datastore,
         },
-        task::{self, test_util::TaskBuilder},
+        task::{self, test_util::TaskBuilder, AggregationMode},
         test_util::noop_meter,
     };
     use janus_core::{
@@ -219,6 +219,7 @@ mod tests {
                 Box::pin(async move {
                     let task = TaskBuilder::new(
                         task::BatchMode::TimeInterval,
+                        AggregationMode::Synchronous,
                         VdafInstance::Fake { rounds: 1 },
                     )
                     .with_report_expiry_age(Some(REPORT_EXPIRY_AGE))
@@ -240,7 +241,7 @@ mod tests {
                         aggregation_param,
                         (),
                         Interval::from_time(&client_timestamp).unwrap(),
-                        AggregationJobState::InProgress,
+                        AggregationJobState::Active,
                         AggregationJobStep::from(0),
                     ))
                     .await
@@ -369,9 +370,11 @@ mod tests {
         let task = ds
             .run_unnamed_tx(|tx| {
                 let clock = clock.clone();
+
                 Box::pin(async move {
                     let task = TaskBuilder::new(
                         task::BatchMode::TimeInterval,
+                        AggregationMode::Synchronous,
                         VdafInstance::Fake { rounds: 1 },
                     )
                     .with_report_expiry_age(Some(REPORT_EXPIRY_AGE))
@@ -391,9 +394,13 @@ mod tests {
                             Vec::from("payload_0"),
                         ),
                     );
-                    tx.put_scrubbed_report(task.id(), &report_share)
-                        .await
-                        .unwrap();
+                    tx.put_scrubbed_report(
+                        task.id(),
+                        report_share.metadata().id(),
+                        report_share.metadata().time(),
+                    )
+                    .await
+                    .unwrap();
 
                     // Aggregation artifacts.
                     let aggregation_job_id = random();
@@ -403,7 +410,7 @@ mod tests {
                         aggregation_param,
                         (),
                         Interval::from_time(&client_timestamp).unwrap(),
-                        AggregationJobState::InProgress,
+                        AggregationJobState::Active,
                         AggregationJobStep::from(0),
                     ))
                     .await
@@ -548,6 +555,7 @@ mod tests {
                         task::BatchMode::LeaderSelected {
                             batch_time_window_size: None,
                         },
+                        AggregationMode::Synchronous,
                         VdafInstance::Fake { rounds: 1 },
                     )
                     .with_report_expiry_age(Some(REPORT_EXPIRY_AGE))
@@ -574,7 +582,7 @@ mod tests {
                         aggregation_param,
                         batch_id,
                         Interval::from_time(&client_timestamp).unwrap(),
-                        AggregationJobState::InProgress,
+                        AggregationJobState::Active,
                         AggregationJobStep::from(0),
                     );
                     tx.put_aggregation_job(&aggregation_job).await.unwrap();
@@ -713,11 +721,13 @@ mod tests {
         let task = ds
             .run_unnamed_tx(|tx| {
                 let clock = clock.clone();
+
                 Box::pin(async move {
                     let task = TaskBuilder::new(
                         task::BatchMode::LeaderSelected {
                             batch_time_window_size: None,
                         },
+                        AggregationMode::Synchronous,
                         VdafInstance::Fake { rounds: 1 },
                     )
                     .with_report_expiry_age(Some(REPORT_EXPIRY_AGE))
@@ -742,9 +752,13 @@ mod tests {
                             Vec::from("payload_0"),
                         ),
                     );
-                    tx.put_scrubbed_report(task.id(), &report_share)
-                        .await
-                        .unwrap();
+                    tx.put_scrubbed_report(
+                        task.id(),
+                        report_share.metadata().id(),
+                        report_share.metadata().time(),
+                    )
+                    .await
+                    .unwrap();
 
                     // Aggregation artifacts.
                     let batch_id = random();
@@ -754,7 +768,7 @@ mod tests {
                         aggregation_param,
                         batch_id,
                         Interval::from_time(&client_timestamp).unwrap(),
-                        AggregationJobState::InProgress,
+                        AggregationJobState::Active,
                         AggregationJobStep::from(0),
                     );
                     tx.put_aggregation_job(&aggregation_job).await.unwrap();

@@ -13,7 +13,7 @@ use divviup_client::{
     Client, DivviupClient, Histogram, HpkeConfig, NewAggregator, NewSharedAggregator, NewTask,
     SumVec, Vdaf,
 };
-use janus_aggregator_core::task::{test_util::TaskBuilder, BatchMode};
+use janus_aggregator_core::task::{test_util::TaskBuilder, AggregationMode, BatchMode};
 #[cfg(feature = "ohttp")]
 use janus_client::OhttpConfig;
 use janus_collector::PrivateCollectorCredential;
@@ -202,7 +202,7 @@ impl InClusterJanusPair {
             .unwrap();
 
         let (task_parameters, task_builder) = build_test_task(
-            TaskBuilder::new(batch_mode, vdaf)
+            TaskBuilder::new(batch_mode, AggregationMode::Synchronous, vdaf)
                 .with_leader_aggregator_endpoint(leader_aggregator_dap_url)
                 .with_helper_aggregator_endpoint(helper_aggregator_dap_url),
             TestContext::Remote,
@@ -287,7 +287,7 @@ impl InClusterJanusPair {
         let cluster = Cluster::new(&kubeconfig_path, &kubectl_context_name);
 
         let (task_parameters, task_builder) = build_test_task(
-            TaskBuilder::new(batch_mode, vdaf),
+            TaskBuilder::new(batch_mode, AggregationMode::Synchronous, vdaf),
             TestContext::VirtualNetwork,
             Duration::from_millis(500),
             Duration::from_secs(60),

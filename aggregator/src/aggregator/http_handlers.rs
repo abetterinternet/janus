@@ -20,8 +20,8 @@ use janus_core::{
 use janus_messages::{
     batch_mode::TimeInterval, codec::Decode, problem_type::DapProblemType, taskprov::TaskConfig,
     AggregateShare, AggregateShareReq, AggregationJobContinueReq, AggregationJobId,
-    AggregationJobInitializeReq, AggregationJobResp, CollectionJobId, CollectionJobReq,
-    CollectionJobResp, HpkeConfigList, Report, TaskId,
+    AggregationJobInitializeReq, AggregationJobResp, AggregationJobStep, CollectionJobId,
+    CollectionJobReq, CollectionJobResp, HpkeConfigList, Report, TaskId,
 };
 use mime::{FromStrError, Mime};
 use opentelemetry::{
@@ -29,6 +29,7 @@ use opentelemetry::{
     KeyValue,
 };
 use prio::codec::Encode;
+use querystring::querify;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::{borrow::Cow, time::Duration as StdDuration};
@@ -91,6 +92,15 @@ async fn run_error_handler(error: &Error, mut conn: Conn) -> Conn {
                 &ProblemDocument::new_dap(DapProblemType::UnrecognizedAggregationJob)
                     .with_task_id(task_id),
             ),
+        Error::AbandonedAggregationJob(task_id, aggregation_job_id) => conn.with_problem_document(
+            &ProblemDocument::new(
+                "https://docs.divviup.org/references/janus-errors#aggregation-job-abandoned",
+                "The aggregation job has been abandoned.",
+                Status::Gone,
+            )
+            .with_task_id(task_id)
+            .with_aggregation_job_id(aggregation_job_id),
+        ),
         Error::DeletedAggregationJob(task_id, aggregation_job_id) => conn.with_problem_document(
             &ProblemDocument::new(
                 "https://docs.divviup.org/references/janus-errors#aggregation-job-deleted",
@@ -403,6 +413,10 @@ where
                     Box::new(api(aggregation_jobs_post::<C>)) as Box<dyn Handler>
                 }),
             )
+            .get(
+                AGGREGATION_JOB_ROUTE,
+                instrumented(api(aggregation_jobs_get::<C>)),
+            )
             .delete(
                 AGGREGATION_JOB_ROUTE,
                 instrumented(api(aggregation_jobs_delete::<C>)),
@@ -591,6 +605,32 @@ async fn aggregation_jobs_post<C: Clock>(
         .ok_or(Error::ClientDisconnected)??;
 
     Ok(EncodedBody::new(response, AggregationJobResp::MEDIA_TYPE).with_status(Status::Accepted))
+}
+
+/// API handler for the "/tasks/.../aggregation_jobs/..." GET endpoint.
+async fn aggregation_jobs_get<C: Clock>(
+    conn: &mut Conn,
+    State(aggregator): State<Arc<Aggregator<C>>>,
+) -> Result<EncodedBody<AggregationJobResp>, Error> {
+    let task_id = parse_task_id(conn)?;
+    let aggregation_job_id = parse_aggregation_job_id(conn)?;
+    let auth_token = parse_auth_token(&task_id, conn)?;
+    let taskprov_task_config = parse_taskprov_header(&aggregator, &task_id, conn)?;
+    let step = parse_step(conn)?
+        .ok_or_else(|| Error::BadRequest("missing step query parameter".to_string()))?;
+
+    let response = conn
+        .cancel_on_disconnect(aggregator.handle_aggregate_get(
+            &task_id,
+            &aggregation_job_id,
+            auth_token,
+            taskprov_task_config.as_ref(),
+            step,
+        ))
+        .await
+        .ok_or(Error::ClientDisconnected)??;
+
+    Ok(EncodedBody::new(response, AggregationJobResp::MEDIA_TYPE).with_status(Status::Ok))
 }
 
 /// API handler for the "/tasks/.../aggregation_jobs/..." DELETE endpoint.
@@ -819,6 +859,17 @@ fn parse_taskprov_header<C: Clock>(
     Ok(Some(
         TaskConfig::get_decoded(&task_config_encoded).map_err(Error::MessageDecode)?,
     ))
+}
+
+/// Gets the [`AggregationJobStep`] from the request's query string.
+fn parse_step(conn: &Conn) -> Result<Option<AggregationJobStep>, Error> {
+    const STEP_KEY: &str = "step";
+    querify(conn.querystring())
+        .into_iter()
+        .find(|(key, _)| *key == STEP_KEY)
+        .map(|(_, val)| val.parse::<u16>().map(AggregationJobStep::from))
+        .transpose()
+        .map_err(|err| Error::BadRequest(format!("couldn't parse step: {err}")))
 }
 
 struct BodyBytes(Vec<u8>);

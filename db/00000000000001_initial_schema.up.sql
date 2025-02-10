@@ -9,6 +9,13 @@ CREATE TYPE AGGREGATOR_ROLE AS ENUM(
     'HELPER'
 );
 
+-- Specifies the aggregation mode (how aggregation is performed, e.g. synchronously or
+-- asynchronously) of a task.
+CREATE TYPE AGGREGATION_MODE AS ENUM(
+    'SYNCHRONOUS',  -- the Helper handles aggregation synchronously
+    'ASYNCHRONOUS'  -- the Helper handles aggregation asynchronously
+);
+
 -- Identifies the different types of authentication tokens.
 CREATE TYPE AUTH_TOKEN_TYPE AS ENUM(
     'DAP_AUTH', -- DAP-01 style DAP-Auth-Token header
@@ -42,11 +49,12 @@ CREATE TABLE hpke_keys(
 -- Another DAP aggregator who we've partnered with to use the taskprov extension.
 CREATE TABLE taskprov_peer_aggregators(
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- artificial ID, internal only.
-    endpoint TEXT NOT NULL,          -- peer aggregator HTTPS endpoint
-    role AGGREGATOR_ROLE NOT NULL,   -- the role of this peer aggregator
-    verify_key_init BYTEA NOT NULL,  -- the preshared key used for VDAF verify key derivation.
+    endpoint TEXT NOT NULL,              -- peer aggregator HTTPS endpoint
+    peer_role AGGREGATOR_ROLE NOT NULL,  -- the role of this peer aggregator
 
     -- Parameters applied to every task created with this peer aggregator.
+    aggregation_mode AGGREGATION_MODE,       -- the aggregation mode in use for tasks with this aggregator (populated when )
+    verify_key_init BYTEA NOT NULL,          -- the preshared key used for VDAF verify key derivation.
     tolerable_clock_skew   BIGINT NOT NULL,  -- the maximum acceptable clock skew to allow between client and aggregator, in seconds
     report_expiry_age      BIGINT,           -- the maximum age of a report before it is considered expired (and acceptable for garbage collection), in seconds. NULL means that GC is disabled.
     collector_hpke_config BYTEA NOT NULL,    -- the HPKE config of the collector (encoded HpkeConfig message)
@@ -55,7 +63,7 @@ CREATE TABLE taskprov_peer_aggregators(
     created_at TIMESTAMP NOT NULL,  -- when the row was created
     updated_by TEXT NOT NULL,       -- the name of the transaction that last updated the row
 
-    CONSTRAINT taskprov_peer_aggregator_endpoint_and_role_unique UNIQUE(endpoint, role)
+    CONSTRAINT taskprov_peer_aggregators_endpoint_and_peer_role_unique UNIQUE(endpoint, peer_role)
 );
 
 -- Task aggregator auth tokens that we've shared with the peer aggregator.
@@ -97,6 +105,7 @@ CREATE TABLE tasks(
     aggregator_role             AGGREGATOR_ROLE NOT NULL,  -- the role of this aggregator for this task
     peer_aggregator_endpoint    TEXT NOT NULL,             -- peer aggregator's API endpoint
     batch_mode                  JSONB NOT NULL,            -- the batch mode in use for this task, along with its parameters
+    aggregation_mode            AGGREGATION_MODE,          -- the aggregation mode in use for this task (populated for Helper only)
     vdaf                        JSON NOT NULL,             -- the VDAF instance in use for this task, along with its parameters
     task_start                  TIMESTAMP,                 -- the time before which client reports are not accepted
     task_end                    TIMESTAMP,                 -- the time after which client reports are no longer accepted
@@ -212,10 +221,11 @@ CREATE INDEX client_reports_task_and_timestamp_index ON client_reports(task_id, 
 
 -- Specifies the possible state of an aggregation job.
 CREATE TYPE AGGREGATION_JOB_STATE AS ENUM(
-    'IN_PROGRESS', -- at least one included report is in a non-terminal (START, WAITING) state, processing can continue
-    'FINISHED',    -- all reports have reached a terminal state (FINISHED, FAILED, INVALID)
-    'ABANDONED',   -- we have given up on the aggregation job entirely
-    'DELETED'      -- this aggregation job has been deleted
+    'ACTIVE',            -- at least one included report is in a non-terminal state, processing can continue at will
+    'AWAITING_REQUEST',  -- at least one included report is in a non-terminal state, awaiting a request from the Leader to continue processing
+    'FINISHED',          -- all reports have reached a terminal state (FINISHED, FAILED)
+    'ABANDONED',         -- we have given up on the aggregation job entirely
+    'DELETED'            -- this aggregation job has been deleted
 );
 
 -- An aggregation job, representing the aggregation of a number of client reports.
@@ -242,17 +252,19 @@ CREATE TABLE aggregation_jobs(
     CONSTRAINT aggregation_jobs_unique_id UNIQUE(task_id, aggregation_job_id),
     CONSTRAINT fk_task_id FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
-CREATE INDEX aggregation_jobs_state_and_lease_expiry ON aggregation_jobs(state, lease_expiry) WHERE state = 'IN_PROGRESS';
+CREATE INDEX aggregation_jobs_state_and_lease_expiry ON aggregation_jobs(state, lease_expiry) WHERE state = 'ACTIVE';
 CREATE INDEX aggregation_jobs_task_and_batch_id ON aggregation_jobs(task_id, batch_id);
 CREATE INDEX aggregation_jobs_task_and_client_timestamp_interval ON aggregation_jobs USING gist (task_id, client_timestamp_interval);
 
 -- Specifies the possible state of aggregating a single report.
 CREATE TYPE REPORT_AGGREGATION_STATE AS ENUM(
-    'INIT',      -- the aggregator is ready for the aggregation initialization step
-    'CONTINUE',  -- the aggregator is ready for an aggregation continuation step
-    'POLL',      -- the aggregator is polling for completion of a previous operation
-    'FINISHED',  -- the aggregator has completed the preparation process successfully
-    'FAILED'     -- the aggregator has completed the preparation process unsuccessfully
+    'INIT',                 -- the aggregator is ready for the aggregation initialization step
+    'INIT_PROCESSING',      -- the aggregator is processing an aggregation initialization request asynchronously
+    'CONTINUE',             -- the aggregator is ready for an aggregation continuation step
+    'CONTINUE_PROCESSING',  -- the aggregator is processing an aggregation continuation request asynchronously
+    'POLL',                 -- the aggregator is polling for completion of a previous operation
+    'FINISHED',             -- the aggregator has completed the preparation process successfully
+    'FAILED'                -- the aggregator has completed the preparation process unsuccessfully
 );
 
 -- An aggregation attempt for a single client report. An aggregation job logically contains a number
@@ -282,8 +294,15 @@ CREATE TABLE report_aggregations(
     leader_prep_state    BYTEA,  -- the current prepare state (opaque VDAF message)
     leader_output_share  BYTEA,  -- the leader's recovered output share (opaque VDAF message)
 
-    -- Additional data for state HelperContinue.
+    -- Additional data for state HelperInitProcessing.
+    prepare_init  BYTEA,                  -- the preparation initialization message received from the Leader (opaque DAP message)
+    require_taskbind_extension  BOOLEAN,  -- is the taskprov extension required?
+
+    -- Additional data for state HelperContinue & HelperContinueProcessing.
     helper_prep_state  BYTEA,  -- the current VDAF prepare state (opaque VDAF message)
+
+    -- Additional data for state HelperContinueProcessing.
+    prepare_continue  BYTEA,  -- the preparation continuation message received from the Leader (opaque VDAF message)
 
     -- Additional data for state Failed.
     error_code  SMALLINT,  -- error code corresponding to a DAP ReportShareError value

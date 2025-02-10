@@ -131,6 +131,17 @@ batch_aggregation_shard_count: 32
 # increasing the cost of getting task metrics. (optional, default: 32)
 task_counter_shard_count: 32
 
+# Defines how often to refresh the HPKE configs cache, in milliseconds. This
+# affects how often an aggregator becomes aware of key state changes. (optional,
+# defaults to 30 minutes)
+hpke_configs_refresh_interval: 1800000
+
+# Defines how frequently outstanding asynchronous aggregation jobs where this
+# aggregator is the Leader might be polled if the Helper does not send a
+# Retry-After header, in milliseconds. (If the Helper does send a Retry-After
+# header, it will be respected.) If unspecified, the default is one minute.
+default_async_poll_interval: 5000
+
 # Configuration for the taskprov extension. If enabled, this changes the behavior of the
 # aggregator as described in draft-wang-ppm-dap-taskprov. (optional)
 taskprov_config:

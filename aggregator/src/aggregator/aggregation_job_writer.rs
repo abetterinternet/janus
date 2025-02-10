@@ -344,7 +344,9 @@ impl WriteType for InitialWrite {
     {
         // For new writes (inserts) of aggregation jobs in a non-terminal state, increment
         // aggregation_jobs_created.
-        if aggregation_job.state() == &AggregationJobState::InProgress {
+        if aggregation_job.state() == &AggregationJobState::Active
+            || aggregation_job.state() == &AggregationJobState::AwaitingRequest
+        {
             *batch_aggregation = BatchAggregation::new(
                 *batch_aggregation.task_id(),
                 batch_aggregation.batch_identifier().clone(),
@@ -404,7 +406,9 @@ impl WriteType for UpdateWrite {
         // For updates of aggregation jobs into a terminal state, increment
         // aggregation_jobs_terminated. (This is safe to do since we will not process a terminal
         // aggregation job again.)
-        if aggregation_job.state() != &AggregationJobState::InProgress {
+        if aggregation_job.state() != &AggregationJobState::Active
+            && aggregation_job.state() != &AggregationJobState::AwaitingRequest
+        {
             *batch_aggregation = BatchAggregation::new(
                 *batch_aggregation.task_id(),
                 batch_aggregation.batch_identifier().clone(),
@@ -945,6 +949,11 @@ impl<const SEED_SIZE: usize, A: vdaf::Aggregator<SEED_SIZE, 16>>
             report_aggregation,
             output_share,
         }
+    }
+
+    /// Retrieves the report aggregation to be written.
+    pub fn report_aggregation(&self) -> &ReportAggregation<SEED_SIZE, A> {
+        &self.report_aggregation
     }
 }
 

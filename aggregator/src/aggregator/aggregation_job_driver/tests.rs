@@ -1,11 +1,16 @@
+#![allow(clippy::unit_arg)] // allow reference to dummy::Vdaf's public share, which has the unit type
+
 use crate::{
     aggregator::{
         aggregation_job_driver::AggregationJobDriver,
-        test_util::assert_task_aggregation_counter,
-        test_util::{BATCH_AGGREGATION_SHARD_COUNT, TASK_AGGREGATION_COUNTER_SHARD_COUNT},
+        test_util::{
+            assert_task_aggregation_counter, generate_helper_report_share,
+            BATCH_AGGREGATION_SHARD_COUNT, TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        },
         Error,
     },
     binary_utils::job_driver::JobDriver,
+    cache::HpkeKeypairCache,
 };
 use assert_matches::assert_matches;
 use futures::future::join_all;
@@ -21,7 +26,7 @@ use janus_aggregator_core::{
         test_util::{ephemeral_datastore, EphemeralDatastore},
         Datastore,
     },
-    task::{test_util::TaskBuilder, AggregatorTask, BatchMode, VerifyKey},
+    task::{test_util::TaskBuilder, AggregationMode, AggregatorTask, BatchMode, VerifyKey},
     test_util::noop_meter,
 };
 use janus_core::{
@@ -30,7 +35,7 @@ use janus_core::{
     retries::test_util::LimitedRetryer,
     test_util::{install_test_trace_subscriber, run_vdaf, runtime::TestRuntimeManager},
     time::{Clock, IntervalExt, MockClock, TimeExt},
-    vdaf::{VdafInstance, VERIFY_KEY_LENGTH},
+    vdaf::{VdafInstance, VERIFY_KEY_LENGTH_PRIO3},
     Runtime,
 };
 use janus_messages::{
@@ -55,6 +60,8 @@ use std::{sync::Arc, time::Duration as StdDuration};
 use tokio::time::timeout;
 use trillium_tokio::Stopper;
 
+const DEFAULT_ASYNC_POLL_INTERVAL: StdDuration = StdDuration::from_secs(1);
+
 #[tokio::test]
 async fn aggregation_job_driver() {
     // This is a minimal test that AggregationJobDriver::run() will successfully find
@@ -70,10 +77,15 @@ async fn aggregation_job_driver() {
     let mut runtime_manager = TestRuntimeManager::new();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(2));
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 })
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
 
     let leader_task = task.leader_view().unwrap();
 
@@ -128,7 +140,7 @@ async fn aggregation_job_driver() {
                 (),
                 Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                     .unwrap(),
-                AggregationJobState::InProgress,
+                AggregationJobState::Active,
                 AggregationJobStep::from(0),
             ))
             .await
@@ -199,7 +211,7 @@ async fn aggregation_job_driver() {
             server
                 .mock(
                     req_method,
-                    task.aggregation_job_uri(&aggregation_job_id)
+                    task.aggregation_job_uri(&aggregation_job_id, None)
                         .unwrap()
                         .path(),
                 )
@@ -218,6 +230,8 @@ async fn aggregation_job_driver() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     ));
     let stopper = Stopper::new();
 
@@ -347,18 +361,23 @@ async fn aggregation_job_driver() {
 }
 
 #[tokio::test]
-async fn sync_time_interval_aggregation_job_init_single_step() {
+async fn leader_sync_time_interval_aggregation_job_init_single_step() {
     // Setup: insert a client report and add it to a new aggregation job.
     install_test_trace_subscriber();
     let mut server = mockito::Server::new_async().await;
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(Prio3::new_count(2).unwrap());
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
 
     let leader_task = task.leader_view().unwrap();
 
@@ -368,7 +387,7 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
         .unwrap();
     let batch_identifier = TimeInterval::to_batch_identifier(&leader_task, &(), &time).unwrap();
     let report_metadata = ReportMetadata::new(random(), time, Vec::new());
-    let verify_key: VerifyKey<VERIFY_KEY_LENGTH> = task.vdaf_verify_key().unwrap();
+    let verify_key: VerifyKey<VERIFY_KEY_LENGTH_PRIO3> = task.vdaf_verify_key().unwrap();
 
     let transcript = run_vdaf(
         vdaf.as_ref(),
@@ -450,7 +469,7 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
                 }
 
                 tx.put_aggregation_job(&AggregationJob::<
-                    VERIFY_KEY_LENGTH,
+                    VERIFY_KEY_LENGTH_PRIO3,
                     TimeInterval,
                     Prio3Count,
                 >::new(
@@ -460,7 +479,7 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
@@ -483,7 +502,7 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
                 }
 
                 tx.put_batch_aggregation(&BatchAggregation::<
-                    VERIFY_KEY_LENGTH,
+                    VERIFY_KEY_LENGTH_PRIO3,
                     TimeInterval,
                     Prio3Count,
                 >::new(
@@ -542,7 +561,7 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
     let mocked_aggregate_failure = server
         .mock(
             "PUT",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -555,7 +574,7 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
     let mocked_aggregate_success = server
         .mock(
             "PUT",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -578,9 +597,19 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -588,17 +617,18 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
     mocked_aggregate_failure.assert_async().await;
     mocked_aggregate_success.assert_async().await;
 
-    let want_aggregation_job = AggregationJob::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>::new(
-        *task.id(),
-        aggregation_job_id,
-        (),
-        (),
-        Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
-        AggregationJobState::Finished,
-        AggregationJobStep::from(1),
-    );
+    let want_aggregation_job =
+        AggregationJob::<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>::new(
+            *task.id(),
+            aggregation_job_id,
+            (),
+            (),
+            Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
+            AggregationJobState::Finished,
+            AggregationJobStep::from(1),
+        );
 
-    let want_report_aggregation = ReportAggregation::<VERIFY_KEY_LENGTH, Prio3Count>::new(
+    let want_report_aggregation = ReportAggregation::<VERIFY_KEY_LENGTH_PRIO3, Prio3Count>::new(
         *task.id(),
         aggregation_job_id,
         *report.metadata().id(),
@@ -608,7 +638,7 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
         ReportAggregationState::Finished,
     );
     let want_repeated_public_extension_report_aggregation =
-        ReportAggregation::<VERIFY_KEY_LENGTH, Prio3Count>::new(
+        ReportAggregation::<VERIFY_KEY_LENGTH_PRIO3, Prio3Count>::new(
             *task.id(),
             aggregation_job_id,
             *repeated_public_extension_report.metadata().id(),
@@ -620,7 +650,7 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
             },
         );
     let want_repeated_private_extension_report_aggregation =
-        ReportAggregation::<VERIFY_KEY_LENGTH, Prio3Count>::new(
+        ReportAggregation::<VERIFY_KEY_LENGTH_PRIO3, Prio3Count>::new(
             *task.id(),
             aggregation_job_id,
             *repeated_private_extension_report.metadata().id(),
@@ -632,7 +662,7 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
             },
         );
     let want_repeated_public_private_extension_report_aggregation =
-        ReportAggregation::<VERIFY_KEY_LENGTH, Prio3Count>::new(
+        ReportAggregation::<VERIFY_KEY_LENGTH_PRIO3, Prio3Count>::new(
             *task.id(),
             aggregation_job_id,
             *repeated_public_private_extension_report.metadata().id(),
@@ -645,7 +675,7 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
         );
 
     let want_batch_aggregations = Vec::from([BatchAggregation::<
-        VERIFY_KEY_LENGTH,
+        VERIFY_KEY_LENGTH_PRIO3,
         TimeInterval,
         Prio3Count,
     >::new(
@@ -681,7 +711,7 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
 
             Box::pin(async move {
                 let aggregation_job = tx
-                    .get_aggregation_job::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>(
+                    .get_aggregation_job::<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>(
                         task.id(),
                         &aggregation_job_id,
                     )
@@ -737,7 +767,7 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
                     .unwrap()
                     .unwrap();
                 let batch_aggregations = merge_batch_aggregations_by_batch(
-                    tx.get_batch_aggregations_for_task::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>(&vdaf, task.id())
+                    tx.get_batch_aggregations_for_task::<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>(&vdaf, task.id())
                         .await
                         .unwrap(),
                 );
@@ -776,18 +806,23 @@ async fn sync_time_interval_aggregation_job_init_single_step() {
 }
 
 #[tokio::test]
-async fn sync_time_interval_aggregation_job_init_two_steps() {
+async fn leader_sync_time_interval_aggregation_job_init_two_steps() {
     // Setup: insert a client report and add it to a new aggregation job.
     install_test_trace_subscriber();
     let mut server = mockito::Server::new_async().await;
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(2));
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 })
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
 
     let leader_task = task.leader_view().unwrap();
 
@@ -839,7 +874,7 @@ async fn sync_time_interval_aggregation_job_init_two_steps() {
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
@@ -908,7 +943,7 @@ async fn sync_time_interval_aggregation_job_init_two_steps() {
     let mocked_aggregate_success = server
         .mock(
             "PUT",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -931,9 +966,19 @@ async fn sync_time_interval_aggregation_job_init_two_steps() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -946,7 +991,7 @@ async fn sync_time_interval_aggregation_job_init_two_steps() {
         aggregation_param,
         (),
         Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
-        AggregationJobState::InProgress,
+        AggregationJobState::Active,
         AggregationJobStep::from(1),
     );
     let want_report_aggregation = ReportAggregation::<0, dummy::Vdaf>::new(
@@ -1027,7 +1072,7 @@ async fn sync_time_interval_aggregation_job_init_two_steps() {
 }
 
 #[tokio::test]
-async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
+async fn leader_sync_time_interval_aggregation_job_init_partially_garbage_collected() {
     // This is a regression test for https://github.com/divviup/janus/issues/2464.
 
     const OLDEST_ALLOWED_REPORT_TIMESTAMP: Time = Time::from_seconds_since_epoch(1000);
@@ -1040,13 +1085,18 @@ async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
     let clock = MockClock::new(OLDEST_ALLOWED_REPORT_TIMESTAMP);
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(Prio3::new_count(2).unwrap());
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .with_report_expiry_age(Some(REPORT_EXPIRY_AGE))
-        .with_time_precision(TIME_PRECISION)
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .with_report_expiry_age(Some(REPORT_EXPIRY_AGE))
+    .with_time_precision(TIME_PRECISION)
+    .build();
 
     let leader_task = task.leader_view().unwrap();
 
@@ -1069,7 +1119,7 @@ async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
     let gc_ineligible_report_metadata =
         ReportMetadata::new(random(), gc_ineligible_time, Vec::new());
 
-    let verify_key: VerifyKey<VERIFY_KEY_LENGTH> = task.vdaf_verify_key().unwrap();
+    let verify_key: VerifyKey<VERIFY_KEY_LENGTH_PRIO3> = task.vdaf_verify_key().unwrap();
 
     let gc_eligible_transcript = run_vdaf(
         vdaf.as_ref(),
@@ -1131,7 +1181,7 @@ async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
                 .unwrap();
 
                 tx.put_aggregation_job(&AggregationJob::<
-                    VERIFY_KEY_LENGTH,
+                    VERIFY_KEY_LENGTH_PRIO3,
                     TimeInterval,
                     Prio3Count,
                 >::new(
@@ -1144,7 +1194,7 @@ async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
                         gc_ineligible_time.difference(&gc_eligible_time).unwrap(),
                     )
                     .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
@@ -1161,7 +1211,7 @@ async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
                 .unwrap();
 
                 tx.put_batch_aggregation(&BatchAggregation::<
-                    VERIFY_KEY_LENGTH,
+                    VERIFY_KEY_LENGTH_PRIO3,
                     TimeInterval,
                     Prio3Count,
                 >::new(
@@ -1181,7 +1231,7 @@ async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
                 .await
                 .unwrap();
                 tx.put_batch_aggregation(&BatchAggregation::<
-                    VERIFY_KEY_LENGTH,
+                    VERIFY_KEY_LENGTH_PRIO3,
                     TimeInterval,
                     Prio3Count,
                 >::new(
@@ -1267,7 +1317,7 @@ async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
     let mocked_aggregate_init = server
         .mock(
             "PUT",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -1290,31 +1340,42 @@ async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
     // Verify.
     mocked_aggregate_init.assert_async().await;
 
-    let want_aggregation_job = AggregationJob::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>::new(
-        *task.id(),
-        aggregation_job_id,
-        (),
-        (),
-        Interval::new(
-            gc_eligible_time,
-            gc_ineligible_time.difference(&gc_eligible_time).unwrap(),
-        )
-        .unwrap(),
-        AggregationJobState::Finished,
-        AggregationJobStep::from(1),
-    );
+    let want_aggregation_job =
+        AggregationJob::<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>::new(
+            *task.id(),
+            aggregation_job_id,
+            (),
+            (),
+            Interval::new(
+                gc_eligible_time,
+                gc_ineligible_time.difference(&gc_eligible_time).unwrap(),
+            )
+            .unwrap(),
+            AggregationJobState::Finished,
+            AggregationJobStep::from(1),
+        );
 
     let want_gc_eligible_report_aggregation =
-        ReportAggregation::<VERIFY_KEY_LENGTH, Prio3Count>::new(
+        ReportAggregation::<VERIFY_KEY_LENGTH_PRIO3, Prio3Count>::new(
             *task.id(),
             aggregation_job_id,
             *gc_eligible_report.metadata().id(),
@@ -1324,7 +1385,7 @@ async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
             ReportAggregationState::Finished,
         );
     let want_ineligible_report_aggregation =
-        ReportAggregation::<VERIFY_KEY_LENGTH, Prio3Count>::new(
+        ReportAggregation::<VERIFY_KEY_LENGTH_PRIO3, Prio3Count>::new(
             *task.id(),
             aggregation_job_id,
             *gc_ineligible_report.metadata().id(),
@@ -1338,7 +1399,7 @@ async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
         want_ineligible_report_aggregation,
     ]);
     let want_batch_aggregations = Vec::from([BatchAggregation::<
-        VERIFY_KEY_LENGTH,
+        VERIFY_KEY_LENGTH_PRIO3,
         TimeInterval,
         Prio3Count,
     >::new(
@@ -1362,7 +1423,7 @@ async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
             let task = task.clone();
             Box::pin(async move {
                 let aggregation_job = tx
-                    .get_aggregation_job::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>(
+                    .get_aggregation_job::<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>(
                         task.id(),
                         &aggregation_job_id,
                     )
@@ -1380,7 +1441,7 @@ async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
                     .await
                     .unwrap();
                 let batch_aggregations = merge_batch_aggregations_by_batch(
-                    tx.get_batch_aggregations_for_task::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>(&vdaf, task.id())
+                    tx.get_batch_aggregations_for_task::<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>(&vdaf, task.id())
                         .await
                         .unwrap(),
                 );
@@ -1399,19 +1460,21 @@ async fn sync_time_interval_aggregation_job_init_partially_garbage_collected() {
 }
 
 #[tokio::test]
-async fn sync_leader_selected_aggregation_job_init_single_step() {
+async fn leader_sync_leader_selected_aggregation_job_init_single_step() {
     // Setup: insert a client report and add it to a new aggregation job.
     install_test_trace_subscriber();
     let mut server = mockito::Server::new_async().await;
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(Prio3::new_count(2).unwrap());
 
     let task = TaskBuilder::new(
         BatchMode::LeaderSelected {
             batch_time_window_size: None,
         },
+        AggregationMode::Synchronous,
         VdafInstance::Prio3Count,
     )
     .with_helper_aggregator_endpoint(server.url().parse().unwrap())
@@ -1427,7 +1490,7 @@ async fn sync_leader_selected_aggregation_job_init_single_step() {
             .unwrap(),
         Vec::new(),
     );
-    let verify_key: VerifyKey<VERIFY_KEY_LENGTH> = task.vdaf_verify_key().unwrap();
+    let verify_key: VerifyKey<VERIFY_KEY_LENGTH_PRIO3> = task.vdaf_verify_key().unwrap();
 
     let transcript = run_vdaf(
         vdaf.as_ref(),
@@ -1461,7 +1524,7 @@ async fn sync_leader_selected_aggregation_job_init_single_step() {
                     .unwrap();
 
                 tx.put_aggregation_job(&AggregationJob::<
-                    VERIFY_KEY_LENGTH,
+                    VERIFY_KEY_LENGTH_PRIO3,
                     LeaderSelected,
                     Prio3Count,
                 >::new(
@@ -1471,7 +1534,7 @@ async fn sync_leader_selected_aggregation_job_init_single_step() {
                     batch_id,
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
@@ -1484,7 +1547,7 @@ async fn sync_leader_selected_aggregation_job_init_single_step() {
                 .unwrap();
 
                 tx.put_batch_aggregation(&BatchAggregation::<
-                    VERIFY_KEY_LENGTH,
+                    VERIFY_KEY_LENGTH_PRIO3,
                     LeaderSelected,
                     Prio3Count,
                 >::new(
@@ -1543,7 +1606,7 @@ async fn sync_leader_selected_aggregation_job_init_single_step() {
     let mocked_aggregate_failure = server
         .mock(
             "PUT",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -1556,7 +1619,7 @@ async fn sync_leader_selected_aggregation_job_init_single_step() {
     let mocked_aggregate_success = server
         .mock(
             "PUT",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -1579,9 +1642,19 @@ async fn sync_leader_selected_aggregation_job_init_single_step() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     let error = aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease.clone()))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease.clone()),
+        )
         .await
         .unwrap_err();
     assert_matches!(
@@ -1592,7 +1665,15 @@ async fn sync_leader_selected_aggregation_job_init_single_step() {
         }
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -1600,16 +1681,17 @@ async fn sync_leader_selected_aggregation_job_init_single_step() {
     mocked_aggregate_failure.assert_async().await;
     mocked_aggregate_success.assert_async().await;
 
-    let want_aggregation_job = AggregationJob::<VERIFY_KEY_LENGTH, LeaderSelected, Prio3Count>::new(
-        *task.id(),
-        aggregation_job_id,
-        (),
-        batch_id,
-        Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
-        AggregationJobState::Finished,
-        AggregationJobStep::from(1),
-    );
-    let want_report_aggregation = ReportAggregation::<VERIFY_KEY_LENGTH, Prio3Count>::new(
+    let want_aggregation_job =
+        AggregationJob::<VERIFY_KEY_LENGTH_PRIO3, LeaderSelected, Prio3Count>::new(
+            *task.id(),
+            aggregation_job_id,
+            (),
+            batch_id,
+            Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
+            AggregationJobState::Finished,
+            AggregationJobStep::from(1),
+        );
+    let want_report_aggregation = ReportAggregation::<VERIFY_KEY_LENGTH_PRIO3, Prio3Count>::new(
         *task.id(),
         aggregation_job_id,
         *report.metadata().id(),
@@ -1619,7 +1701,7 @@ async fn sync_leader_selected_aggregation_job_init_single_step() {
         ReportAggregationState::Finished,
     );
     let want_batch_aggregations = Vec::from([BatchAggregation::<
-        VERIFY_KEY_LENGTH,
+        VERIFY_KEY_LENGTH_PRIO3,
         LeaderSelected,
         Prio3Count,
     >::new(
@@ -1643,7 +1725,7 @@ async fn sync_leader_selected_aggregation_job_init_single_step() {
                 (Arc::clone(&vdaf), task.clone(), *report.metadata().id());
             Box::pin(async move {
                 let aggregation_job = tx
-                    .get_aggregation_job::<VERIFY_KEY_LENGTH, LeaderSelected, Prio3Count>(
+                    .get_aggregation_job::<VERIFY_KEY_LENGTH_PRIO3, LeaderSelected, Prio3Count>(
                         task.id(),
                         &aggregation_job_id,
                     )
@@ -1663,7 +1745,7 @@ async fn sync_leader_selected_aggregation_job_init_single_step() {
                     .unwrap()
                     .unwrap();
                 let batch_aggregations = merge_batch_aggregations_by_batch(
-                    tx.get_batch_aggregations_for_task::<VERIFY_KEY_LENGTH, LeaderSelected, Prio3Count>(
+                    tx.get_batch_aggregations_for_task::<VERIFY_KEY_LENGTH_PRIO3, LeaderSelected, Prio3Count>(
                         &vdaf,
                         task.id(),
                     )
@@ -1689,19 +1771,21 @@ async fn sync_leader_selected_aggregation_job_init_single_step() {
 }
 
 #[tokio::test]
-async fn sync_leader_selected_aggregation_job_init_two_steps() {
+async fn leader_sync_leader_selected_aggregation_job_init_two_steps() {
     // Setup: insert a client report and add it to a new aggregation job.
     install_test_trace_subscriber();
     let mut server = mockito::Server::new_async().await;
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(2));
 
     let task = TaskBuilder::new(
         BatchMode::LeaderSelected {
             batch_time_window_size: None,
         },
+        AggregationMode::Synchronous,
         VdafInstance::Fake { rounds: 2 },
     )
     .with_helper_aggregator_endpoint(server.url().parse().unwrap())
@@ -1760,7 +1844,7 @@ async fn sync_leader_selected_aggregation_job_init_two_steps() {
                     batch_id,
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
@@ -1829,7 +1913,7 @@ async fn sync_leader_selected_aggregation_job_init_two_steps() {
     let mocked_aggregate_success = server
         .mock(
             "PUT",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -1852,9 +1936,19 @@ async fn sync_leader_selected_aggregation_job_init_two_steps() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -1867,7 +1961,7 @@ async fn sync_leader_selected_aggregation_job_init_two_steps() {
         aggregation_param,
         batch_id,
         Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
-        AggregationJobState::InProgress,
+        AggregationJobState::Active,
         AggregationJobStep::from(1),
     );
     let want_report_aggregation = ReportAggregation::<0, dummy::Vdaf>::new(
@@ -1948,7 +2042,7 @@ async fn sync_leader_selected_aggregation_job_init_two_steps() {
 }
 
 #[tokio::test]
-async fn sync_time_interval_aggregation_job_continue() {
+async fn leader_sync_time_interval_aggregation_job_continue() {
     // Setup: insert a client report and add it to an aggregation job whose state has already
     // been stepped once.
     install_test_trace_subscriber();
@@ -1956,11 +2050,16 @@ async fn sync_time_interval_aggregation_job_continue() {
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(2));
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 })
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
     let leader_task = task.leader_view().unwrap();
     let time = clock
         .now()
@@ -2025,7 +2124,7 @@ async fn sync_time_interval_aggregation_job_continue() {
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(1),
                 ))
                 .await
@@ -2115,7 +2214,7 @@ async fn sync_time_interval_aggregation_job_continue() {
     let mocked_aggregate_failure = server
         .mock(
             "POST",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -2128,7 +2227,7 @@ async fn sync_time_interval_aggregation_job_continue() {
     let mocked_aggregate_success = server
         .mock(
             "POST",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -2148,9 +2247,19 @@ async fn sync_time_interval_aggregation_job_continue() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     let error = aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease.clone()))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease.clone()),
+        )
         .await
         .unwrap_err();
     assert_matches!(
@@ -2161,7 +2270,15 @@ async fn sync_time_interval_aggregation_job_continue() {
         }
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -2270,7 +2387,7 @@ async fn sync_time_interval_aggregation_job_continue() {
 }
 
 #[tokio::test]
-async fn sync_leader_selected_aggregation_job_continue() {
+async fn leader_sync_leader_selected_aggregation_job_continue() {
     // Setup: insert a client report and add it to an aggregation job whose state has already
     // been stepped once.
     install_test_trace_subscriber();
@@ -2278,12 +2395,14 @@ async fn sync_leader_selected_aggregation_job_continue() {
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(2));
 
     let task = TaskBuilder::new(
         BatchMode::LeaderSelected {
             batch_time_window_size: None,
         },
+        AggregationMode::Synchronous,
         VdafInstance::Fake { rounds: 2 },
     )
     .with_helper_aggregator_endpoint(server.url().parse().unwrap())
@@ -2347,7 +2466,7 @@ async fn sync_leader_selected_aggregation_job_continue() {
                     batch_id,
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(1),
                 ))
                 .await
@@ -2421,7 +2540,7 @@ async fn sync_leader_selected_aggregation_job_continue() {
     let mocked_aggregate_failure = server
         .mock(
             "POST",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -2434,7 +2553,7 @@ async fn sync_leader_selected_aggregation_job_continue() {
     let mocked_aggregate_success = server
         .mock(
             "POST",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -2454,9 +2573,19 @@ async fn sync_leader_selected_aggregation_job_continue() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -2558,18 +2687,23 @@ async fn sync_leader_selected_aggregation_job_continue() {
 }
 
 #[tokio::test]
-async fn async_aggregation_job_init_to_pending() {
+async fn leader_async_aggregation_job_init_to_pending() {
     // Setup: insert a client report and add it to a new aggregation job.
     install_test_trace_subscriber();
     let mut server = mockito::Server::new_async().await;
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(1));
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 1 },
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
 
     let leader_task = task.leader_view().unwrap();
 
@@ -2622,7 +2756,7 @@ async fn async_aggregation_job_init_to_pending() {
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
@@ -2681,7 +2815,7 @@ async fn async_aggregation_job_init_to_pending() {
     let mocked_aggregate_request = server
         .mock(
             "PUT",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -2704,9 +2838,19 @@ async fn async_aggregation_job_init_to_pending() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -2719,7 +2863,7 @@ async fn async_aggregation_job_init_to_pending() {
         aggregation_param,
         (),
         Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
-        AggregationJobState::InProgress,
+        AggregationJobState::Active,
         AggregationJobStep::from(0),
     );
 
@@ -2802,18 +2946,23 @@ async fn async_aggregation_job_init_to_pending() {
 }
 
 #[tokio::test]
-async fn async_aggregation_job_init_to_pending_two_step() {
+async fn leader_async_aggregation_job_init_to_pending_two_step() {
     // Setup: insert a client report and add it to a new aggregation job.
     install_test_trace_subscriber();
     let mut server = mockito::Server::new_async().await;
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(2));
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 })
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
 
     let leader_task = task.leader_view().unwrap();
 
@@ -2866,7 +3015,7 @@ async fn async_aggregation_job_init_to_pending_two_step() {
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
@@ -2925,7 +3074,7 @@ async fn async_aggregation_job_init_to_pending_two_step() {
     let mocked_aggregate_request = server
         .mock(
             "PUT",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -2948,9 +3097,19 @@ async fn async_aggregation_job_init_to_pending_two_step() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -2963,7 +3122,7 @@ async fn async_aggregation_job_init_to_pending_two_step() {
         aggregation_param,
         (),
         Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
-        AggregationJobState::InProgress,
+        AggregationJobState::Active,
         AggregationJobStep::from(0),
     );
 
@@ -3046,18 +3205,23 @@ async fn async_aggregation_job_init_to_pending_two_step() {
 }
 
 #[tokio::test]
-async fn async_aggregation_job_continue_to_pending() {
+async fn leader_async_aggregation_job_continue_to_pending() {
     // Setup: insert a client report and add it to a new aggregation job.
     install_test_trace_subscriber();
     let mut server = mockito::Server::new_async().await;
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(2));
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 })
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
 
     let leader_task = task.leader_view().unwrap();
 
@@ -3114,7 +3278,7 @@ async fn async_aggregation_job_continue_to_pending() {
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(1),
                 ))
                 .await
@@ -3174,7 +3338,7 @@ async fn async_aggregation_job_continue_to_pending() {
     let mocked_aggregate_request = server
         .mock(
             "POST",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -3194,9 +3358,19 @@ async fn async_aggregation_job_continue_to_pending() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -3209,7 +3383,7 @@ async fn async_aggregation_job_continue_to_pending() {
         aggregation_param,
         (),
         Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
-        AggregationJobState::InProgress,
+        AggregationJobState::Active,
         AggregationJobStep::from(1),
     );
 
@@ -3292,18 +3466,23 @@ async fn async_aggregation_job_continue_to_pending() {
 }
 
 #[tokio::test]
-async fn async_aggregation_job_init_poll_to_pending() {
+async fn leader_async_aggregation_job_init_poll_to_pending() {
     // Setup: insert a client report and add it to a new aggregation job.
     install_test_trace_subscriber();
     let mut server = mockito::Server::new_async().await;
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(1));
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 1 },
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
 
     let leader_task = task.leader_view().unwrap();
 
@@ -3357,7 +3536,7 @@ async fn async_aggregation_job_init_poll_to_pending() {
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
@@ -3411,7 +3590,7 @@ async fn async_aggregation_job_init_poll_to_pending() {
     let mocked_aggregate_request = server
         .mock(
             "GET",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -3430,9 +3609,19 @@ async fn async_aggregation_job_init_poll_to_pending() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -3445,7 +3634,7 @@ async fn async_aggregation_job_init_poll_to_pending() {
         aggregation_param,
         (),
         Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
-        AggregationJobState::InProgress,
+        AggregationJobState::Active,
         AggregationJobStep::from(0),
     );
 
@@ -3528,18 +3717,23 @@ async fn async_aggregation_job_init_poll_to_pending() {
 }
 
 #[tokio::test]
-async fn async_aggregation_job_init_poll_to_pending_two_step() {
+async fn leader_async_aggregation_job_init_poll_to_pending_two_step() {
     // Setup: insert a client report and add it to a new aggregation job.
     install_test_trace_subscriber();
     let mut server = mockito::Server::new_async().await;
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(2));
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 })
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
 
     let leader_task = task.leader_view().unwrap();
 
@@ -3593,7 +3787,7 @@ async fn async_aggregation_job_init_poll_to_pending_two_step() {
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
@@ -3647,7 +3841,7 @@ async fn async_aggregation_job_init_poll_to_pending_two_step() {
     let mocked_aggregate_request = server
         .mock(
             "GET",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -3666,9 +3860,19 @@ async fn async_aggregation_job_init_poll_to_pending_two_step() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -3681,7 +3885,7 @@ async fn async_aggregation_job_init_poll_to_pending_two_step() {
         aggregation_param,
         (),
         Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
-        AggregationJobState::InProgress,
+        AggregationJobState::Active,
         AggregationJobStep::from(0),
     );
 
@@ -3764,18 +3968,23 @@ async fn async_aggregation_job_init_poll_to_pending_two_step() {
 }
 
 #[tokio::test]
-async fn async_aggregation_job_init_poll_to_finished() {
+async fn leader_async_aggregation_job_init_poll_to_finished() {
     // Setup: insert a client report and add it to a new aggregation job.
     install_test_trace_subscriber();
     let mut server = mockito::Server::new_async().await;
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(1));
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 1 },
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
 
     let leader_task = task.leader_view().unwrap();
 
@@ -3829,7 +4038,7 @@ async fn async_aggregation_job_init_poll_to_finished() {
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
@@ -3890,7 +4099,7 @@ async fn async_aggregation_job_init_poll_to_finished() {
     let mocked_aggregate_request = server
         .mock(
             "GET",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -3909,9 +4118,19 @@ async fn async_aggregation_job_init_poll_to_finished() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -4005,18 +4224,23 @@ async fn async_aggregation_job_init_poll_to_finished() {
 }
 
 #[tokio::test]
-async fn async_aggregation_job_init_poll_to_continue() {
+async fn leader_async_aggregation_job_init_poll_to_continue() {
     // Setup: insert a client report and add it to a new aggregation job.
     install_test_trace_subscriber();
     let mut server = mockito::Server::new_async().await;
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(2));
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 })
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
 
     let leader_task = task.leader_view().unwrap();
 
@@ -4070,7 +4294,7 @@ async fn async_aggregation_job_init_poll_to_continue() {
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(0),
                 ))
                 .await
@@ -4131,7 +4355,7 @@ async fn async_aggregation_job_init_poll_to_continue() {
     let mocked_aggregate_request = server
         .mock(
             "GET",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -4150,9 +4374,19 @@ async fn async_aggregation_job_init_poll_to_continue() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -4165,7 +4399,7 @@ async fn async_aggregation_job_init_poll_to_continue() {
         aggregation_param,
         (),
         Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
-        AggregationJobState::InProgress,
+        AggregationJobState::Active,
         AggregationJobStep::from(1),
     );
 
@@ -4251,7 +4485,7 @@ async fn async_aggregation_job_init_poll_to_continue() {
 }
 
 #[tokio::test]
-async fn async_aggregation_job_continue_poll_to_pending() {
+async fn leader_async_aggregation_job_continue_poll_to_pending() {
     // Setup: insert a client report and add it to an aggregation job whose state has already
     // been stepped once.
     install_test_trace_subscriber();
@@ -4259,11 +4493,16 @@ async fn async_aggregation_job_continue_poll_to_pending() {
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(2));
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 })
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
     let leader_task = task.leader_view().unwrap();
     let time = clock
         .now()
@@ -4318,7 +4557,7 @@ async fn async_aggregation_job_continue_poll_to_pending() {
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(1),
                 ))
                 .await
@@ -4373,7 +4612,7 @@ async fn async_aggregation_job_continue_poll_to_pending() {
     let mocked_aggregate_success = server
         .mock(
             "GET",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -4392,9 +4631,19 @@ async fn async_aggregation_job_continue_poll_to_pending() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -4407,7 +4656,7 @@ async fn async_aggregation_job_continue_poll_to_pending() {
         aggregation_param,
         (),
         Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
-        AggregationJobState::InProgress,
+        AggregationJobState::Active,
         AggregationJobStep::from(1),
     );
     let want_report_aggregation = ReportAggregation::<0, dummy::Vdaf>::new(
@@ -4489,7 +4738,7 @@ async fn async_aggregation_job_continue_poll_to_pending() {
 }
 
 #[tokio::test]
-async fn async_aggregation_job_continue_poll_to_finished() {
+async fn leader_async_aggregation_job_continue_poll_to_finished() {
     // Setup: insert a client report and add it to an aggregation job whose state has already
     // been stepped once.
     install_test_trace_subscriber();
@@ -4497,11 +4746,16 @@ async fn async_aggregation_job_continue_poll_to_finished() {
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(dummy::Vdaf::new(2));
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 2 })
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
     let leader_task = task.leader_view().unwrap();
     let time = clock
         .now()
@@ -4556,7 +4810,7 @@ async fn async_aggregation_job_continue_poll_to_finished() {
                     (),
                     Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
                         .unwrap(),
-                    AggregationJobState::InProgress,
+                    AggregationJobState::Active,
                     AggregationJobStep::from(1),
                 ))
                 .await
@@ -4616,7 +4870,7 @@ async fn async_aggregation_job_continue_poll_to_finished() {
     let mocked_aggregate_success = server
         .mock(
             "GET",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -4635,9 +4889,19 @@ async fn async_aggregation_job_continue_poll_to_finished() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
-        .step_aggregation_job(ds.clone(), Arc::new(lease))
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
         .await
         .unwrap();
 
@@ -4729,12 +4993,715 @@ async fn async_aggregation_job_continue_poll_to_finished() {
         .await;
 }
 
+#[tokio::test]
+async fn helper_async_init_processing_to_finished() {
+    // Setup: insert an aggregation job with a report aggregation in state HelperInitProcessing.
+    install_test_trace_subscriber();
+    let clock = MockClock::default();
+    let ephemeral_datastore = ephemeral_datastore().await;
+    let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    let hpke_keypair = ds.put_hpke_key().await.unwrap();
+    let vdaf = Arc::new(dummy::Vdaf::new(1));
+
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Asynchronous,
+        VdafInstance::Fake { rounds: 1 },
+    )
+    .build();
+    let helper_task = task.helper_view().unwrap();
+    let time = clock
+        .now()
+        .to_batch_interval_start(task.time_precision())
+        .unwrap();
+    let active_batch_identifier =
+        TimeInterval::to_batch_identifier(&helper_task, &(), &time).unwrap();
+    let report_metadata = ReportMetadata::new(random(), time, Vec::new());
+    let verify_key: VerifyKey<0> = task.vdaf_verify_key().unwrap();
+
+    let aggregation_param = dummy::AggregationParam(7);
+    let transcript = run_vdaf(
+        vdaf.as_ref(),
+        task.id(),
+        verify_key.as_bytes(),
+        &aggregation_param,
+        report_metadata.id(),
+        &13,
+    );
+
+    let report_share = generate_helper_report_share::<dummy::Vdaf>(
+        *task.id(),
+        report_metadata,
+        hpke_keypair.config(),
+        &transcript.public_share,
+        Vec::new(),
+        &transcript.helper_input_share,
+    );
+    let aggregation_job_id = random();
+
+    let lease = ds
+        .run_unnamed_tx(|tx| {
+            let helper_task = helper_task.clone();
+            let report_share = report_share.clone();
+            let message = transcript.leader_prepare_transitions[0].message.clone();
+
+            Box::pin(async move {
+                let report_id = *report_share.metadata().id();
+                let report_timestamp = *report_share.metadata().time();
+
+                tx.put_aggregator_task(&helper_task).await.unwrap();
+                tx.put_scrubbed_report(helper_task.id(), &report_id, &report_timestamp)
+                    .await
+                    .unwrap();
+
+                tx.put_aggregation_job(&AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
+                    *helper_task.id(),
+                    aggregation_job_id,
+                    aggregation_param,
+                    (),
+                    Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
+                        .unwrap(),
+                    AggregationJobState::Active,
+                    AggregationJobStep::from(0),
+                ))
+                .await
+                .unwrap();
+
+                tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
+                    *helper_task.id(),
+                    aggregation_job_id,
+                    report_id,
+                    report_timestamp,
+                    0,
+                    None,
+                    ReportAggregationState::HelperInitProcessing {
+                        prepare_init: PrepareInit::new(report_share, message),
+                        require_taskbind_extension: false,
+                    },
+                ))
+                .await
+                .unwrap();
+
+                tx.put_batch_aggregation(&BatchAggregation::<0, TimeInterval, dummy::Vdaf>::new(
+                    *helper_task.id(),
+                    active_batch_identifier,
+                    aggregation_param,
+                    0,
+                    Interval::from_time(&report_timestamp).unwrap(),
+                    BatchAggregationState::Aggregating {
+                        aggregate_share: None,
+                        report_count: 0,
+                        checksum: ReportIdChecksum::default(),
+                        aggregation_jobs_created: 1,
+                        aggregation_jobs_terminated: 0,
+                    },
+                ))
+                .await
+                .unwrap();
+
+                let lease = tx
+                    .acquire_incomplete_aggregation_jobs(&StdDuration::from_secs(60), 1)
+                    .await
+                    .unwrap()
+                    .remove(0);
+
+                Ok(lease)
+            })
+        })
+        .await
+        .unwrap();
+    assert_eq!(lease.leased().task_id(), task.id());
+    assert_eq!(lease.leased().aggregation_job_id(), &aggregation_job_id);
+
+    // Run.
+    let aggregation_job_driver = AggregationJobDriver::new(
+        reqwest::Client::builder().build().unwrap(),
+        LimitedRetryer::new(0),
+        &noop_meter(),
+        BATCH_AGGREGATION_SHARD_COUNT,
+        TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
+    );
+    aggregation_job_driver
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
+        .await
+        .unwrap();
+
+    // Verify.
+    let want_aggregation_job = AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
+        *task.id(),
+        aggregation_job_id,
+        aggregation_param,
+        (),
+        Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
+        AggregationJobState::Finished,
+        AggregationJobStep::from(0),
+    );
+    let want_report_aggregation = ReportAggregation::<0, dummy::Vdaf>::new(
+        *task.id(),
+        aggregation_job_id,
+        *report_share.metadata().id(),
+        *report_share.metadata().time(),
+        0,
+        Some(PrepareResp::new(
+            *report_share.metadata().id(),
+            PrepareStepResult::Continue {
+                message: transcript.helper_prepare_transitions[0].message.clone(),
+            },
+        )),
+        ReportAggregationState::Finished,
+    );
+
+    let want_batch_aggregations =
+        Vec::from([BatchAggregation::<0, TimeInterval, dummy::Vdaf>::new(
+            *task.id(),
+            active_batch_identifier,
+            aggregation_param,
+            0,
+            Interval::from_time(report_share.metadata().time()).unwrap(),
+            BatchAggregationState::Aggregating {
+                aggregate_share: Some(transcript.helper_aggregate_share),
+                report_count: 1,
+                checksum: ReportIdChecksum::for_report_id(report_share.metadata().id()),
+                aggregation_jobs_created: 1,
+                aggregation_jobs_terminated: 1,
+            },
+        )]);
+
+    let (got_aggregation_job, got_report_aggregation, got_batch_aggregations) = ds
+        .run_unnamed_tx(|tx| {
+            let vdaf = Arc::clone(&vdaf);
+            let helper_task = helper_task.clone();
+            let report_metadata = report_share.metadata().clone();
+
+            Box::pin(async move {
+                let aggregation_job = tx
+                    .get_aggregation_job::<0, TimeInterval, dummy::Vdaf>(
+                        helper_task.id(),
+                        &aggregation_job_id,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let report_aggregation = tx
+                    .get_report_aggregation_by_report_id(
+                        vdaf.as_ref(),
+                        &Role::Helper,
+                        helper_task.id(),
+                        &aggregation_job_id,
+                        report_metadata.id(),
+                        &aggregation_param,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let batch_aggregations = merge_batch_aggregations_by_batch(
+                    tx.get_batch_aggregations_for_task::<0, TimeInterval, dummy::Vdaf>(
+                        &vdaf,
+                        helper_task.id(),
+                    )
+                    .await
+                    .unwrap(),
+                );
+
+                Ok((aggregation_job, report_aggregation, batch_aggregations))
+            })
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(want_aggregation_job, got_aggregation_job);
+    assert_eq!(want_report_aggregation, got_report_aggregation);
+    assert_eq!(want_batch_aggregations, got_batch_aggregations);
+
+    assert_task_aggregation_counter(&ds, *task.id(), TaskAggregationCounter::new_with_values(1))
+        .await;
+}
+
+#[tokio::test]
+async fn helper_async_init_processing_to_continue() {
+    // Setup: insert an aggregation job with a report aggregation in state HelperInitProcessing.
+    install_test_trace_subscriber();
+    let clock = MockClock::default();
+    let ephemeral_datastore = ephemeral_datastore().await;
+    let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    let hpke_keypair = ds.put_hpke_key().await.unwrap();
+    let vdaf = Arc::new(dummy::Vdaf::new(2));
+
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Asynchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .build();
+    let helper_task = task.helper_view().unwrap();
+    let time = clock
+        .now()
+        .to_batch_interval_start(task.time_precision())
+        .unwrap();
+    let active_batch_identifier =
+        TimeInterval::to_batch_identifier(&helper_task, &(), &time).unwrap();
+    let report_metadata = ReportMetadata::new(random(), time, Vec::new());
+    let verify_key: VerifyKey<0> = task.vdaf_verify_key().unwrap();
+
+    let aggregation_param = dummy::AggregationParam(7);
+    let transcript = run_vdaf(
+        vdaf.as_ref(),
+        task.id(),
+        verify_key.as_bytes(),
+        &aggregation_param,
+        report_metadata.id(),
+        &13,
+    );
+
+    let report_share = generate_helper_report_share::<dummy::Vdaf>(
+        *task.id(),
+        report_metadata,
+        hpke_keypair.config(),
+        &transcript.public_share,
+        Vec::new(),
+        &transcript.helper_input_share,
+    );
+    let aggregation_job_id = random();
+
+    let lease = ds
+        .run_unnamed_tx(|tx| {
+            let helper_task = helper_task.clone();
+            let report_share = report_share.clone();
+            let message = transcript.leader_prepare_transitions[0].message.clone();
+
+            Box::pin(async move {
+                let report_id = *report_share.metadata().id();
+                let report_timestamp = *report_share.metadata().time();
+
+                tx.put_aggregator_task(&helper_task).await.unwrap();
+                tx.put_scrubbed_report(helper_task.id(), &report_id, &report_timestamp)
+                    .await
+                    .unwrap();
+
+                tx.put_aggregation_job(&AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
+                    *helper_task.id(),
+                    aggregation_job_id,
+                    aggregation_param,
+                    (),
+                    Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
+                        .unwrap(),
+                    AggregationJobState::Active,
+                    AggregationJobStep::from(0),
+                ))
+                .await
+                .unwrap();
+
+                tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
+                    *helper_task.id(),
+                    aggregation_job_id,
+                    report_id,
+                    report_timestamp,
+                    0,
+                    None,
+                    ReportAggregationState::HelperInitProcessing {
+                        prepare_init: PrepareInit::new(report_share, message),
+                        require_taskbind_extension: false,
+                    },
+                ))
+                .await
+                .unwrap();
+
+                tx.put_batch_aggregation(&BatchAggregation::<0, TimeInterval, dummy::Vdaf>::new(
+                    *helper_task.id(),
+                    active_batch_identifier,
+                    aggregation_param,
+                    0,
+                    Interval::from_time(&report_timestamp).unwrap(),
+                    BatchAggregationState::Aggregating {
+                        aggregate_share: None,
+                        report_count: 0,
+                        checksum: ReportIdChecksum::default(),
+                        aggregation_jobs_created: 1,
+                        aggregation_jobs_terminated: 0,
+                    },
+                ))
+                .await
+                .unwrap();
+
+                let lease = tx
+                    .acquire_incomplete_aggregation_jobs(&StdDuration::from_secs(60), 1)
+                    .await
+                    .unwrap()
+                    .remove(0);
+
+                Ok(lease)
+            })
+        })
+        .await
+        .unwrap();
+    assert_eq!(lease.leased().task_id(), task.id());
+    assert_eq!(lease.leased().aggregation_job_id(), &aggregation_job_id);
+
+    // Run.
+    let aggregation_job_driver = AggregationJobDriver::new(
+        reqwest::Client::builder().build().unwrap(),
+        LimitedRetryer::new(0),
+        &noop_meter(),
+        BATCH_AGGREGATION_SHARD_COUNT,
+        TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
+    );
+    aggregation_job_driver
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
+        .await
+        .unwrap();
+
+    // Verify.
+    let want_aggregation_job = AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
+        *task.id(),
+        aggregation_job_id,
+        aggregation_param,
+        (),
+        Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
+        AggregationJobState::AwaitingRequest,
+        AggregationJobStep::from(0),
+    );
+    let want_report_aggregation = ReportAggregation::<0, dummy::Vdaf>::new(
+        *task.id(),
+        aggregation_job_id,
+        *report_share.metadata().id(),
+        *report_share.metadata().time(),
+        0,
+        Some(PrepareResp::new(
+            *report_share.metadata().id(),
+            PrepareStepResult::Continue {
+                message: transcript.helper_prepare_transitions[0].message.clone(),
+            },
+        )),
+        ReportAggregationState::HelperContinue {
+            prepare_state: *transcript.helper_prepare_transitions[0].prepare_state(),
+        },
+    );
+
+    let want_batch_aggregations =
+        Vec::from([BatchAggregation::<0, TimeInterval, dummy::Vdaf>::new(
+            *task.id(),
+            active_batch_identifier,
+            aggregation_param,
+            0,
+            Interval::from_time(report_share.metadata().time()).unwrap(),
+            BatchAggregationState::Aggregating {
+                aggregate_share: None,
+                report_count: 0,
+                checksum: ReportIdChecksum::default(),
+                aggregation_jobs_created: 1,
+                aggregation_jobs_terminated: 0,
+            },
+        )]);
+
+    let (got_aggregation_job, got_report_aggregation, got_batch_aggregations) = ds
+        .run_unnamed_tx(|tx| {
+            let vdaf = Arc::clone(&vdaf);
+            let helper_task = helper_task.clone();
+            let report_metadata = report_share.metadata().clone();
+
+            Box::pin(async move {
+                let aggregation_job = tx
+                    .get_aggregation_job::<0, TimeInterval, dummy::Vdaf>(
+                        helper_task.id(),
+                        &aggregation_job_id,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let report_aggregation = tx
+                    .get_report_aggregation_by_report_id(
+                        vdaf.as_ref(),
+                        &Role::Helper,
+                        helper_task.id(),
+                        &aggregation_job_id,
+                        report_metadata.id(),
+                        &aggregation_param,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let batch_aggregations = merge_batch_aggregations_by_batch(
+                    tx.get_batch_aggregations_for_task::<0, TimeInterval, dummy::Vdaf>(
+                        &vdaf,
+                        helper_task.id(),
+                    )
+                    .await
+                    .unwrap(),
+                );
+
+                Ok((aggregation_job, report_aggregation, batch_aggregations))
+            })
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(want_aggregation_job, got_aggregation_job);
+    assert_eq!(want_report_aggregation, got_report_aggregation);
+    assert_eq!(want_batch_aggregations, got_batch_aggregations);
+
+    assert_task_aggregation_counter(&ds, *task.id(), TaskAggregationCounter::new_with_values(0))
+        .await;
+}
+
+#[tokio::test]
+async fn helper_async_continue_processing_to_finished() {
+    // Setup: insert an aggregation job with a report aggregation in state HelperInitProcessing.
+    install_test_trace_subscriber();
+    let clock = MockClock::default();
+    let ephemeral_datastore = ephemeral_datastore().await;
+    let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    let hpke_keypair = ds.put_hpke_key().await.unwrap();
+    let vdaf = Arc::new(dummy::Vdaf::new(2));
+
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Asynchronous,
+        VdafInstance::Fake { rounds: 2 },
+    )
+    .build();
+    let helper_task = task.helper_view().unwrap();
+    let time = clock
+        .now()
+        .to_batch_interval_start(task.time_precision())
+        .unwrap();
+    let active_batch_identifier =
+        TimeInterval::to_batch_identifier(&helper_task, &(), &time).unwrap();
+    let report_metadata = ReportMetadata::new(random(), time, Vec::new());
+    let verify_key: VerifyKey<0> = task.vdaf_verify_key().unwrap();
+
+    let aggregation_param = dummy::AggregationParam(7);
+    let transcript = run_vdaf(
+        vdaf.as_ref(),
+        task.id(),
+        verify_key.as_bytes(),
+        &aggregation_param,
+        report_metadata.id(),
+        &13,
+    );
+
+    let report_share = generate_helper_report_share::<dummy::Vdaf>(
+        *task.id(),
+        report_metadata,
+        hpke_keypair.config(),
+        &transcript.public_share,
+        Vec::new(),
+        &transcript.helper_input_share,
+    );
+    let aggregation_job_id = random();
+
+    let lease = ds
+        .run_unnamed_tx(|tx| {
+            let helper_task = helper_task.clone();
+            let report_share = report_share.clone();
+            let prepare_state = *transcript.helper_prepare_transitions[0].prepare_state();
+            let message = transcript.leader_prepare_transitions[1].message.clone();
+
+            Box::pin(async move {
+                let report_id = *report_share.metadata().id();
+                let report_timestamp = *report_share.metadata().time();
+
+                tx.put_aggregator_task(&helper_task).await.unwrap();
+                tx.put_scrubbed_report(helper_task.id(), &report_id, &report_timestamp)
+                    .await
+                    .unwrap();
+
+                tx.put_aggregation_job(&AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
+                    *helper_task.id(),
+                    aggregation_job_id,
+                    aggregation_param,
+                    (),
+                    Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
+                        .unwrap(),
+                    AggregationJobState::Active,
+                    AggregationJobStep::from(1),
+                ))
+                .await
+                .unwrap();
+
+                tx.put_report_aggregation(&ReportAggregation::<0, dummy::Vdaf>::new(
+                    *helper_task.id(),
+                    aggregation_job_id,
+                    report_id,
+                    report_timestamp,
+                    0,
+                    None,
+                    ReportAggregationState::HelperContinueProcessing {
+                        prepare_state,
+                        prepare_continue: PrepareContinue::new(report_id, message),
+                    },
+                ))
+                .await
+                .unwrap();
+
+                tx.put_batch_aggregation(&BatchAggregation::<0, TimeInterval, dummy::Vdaf>::new(
+                    *helper_task.id(),
+                    active_batch_identifier,
+                    aggregation_param,
+                    0,
+                    Interval::from_time(&report_timestamp).unwrap(),
+                    BatchAggregationState::Aggregating {
+                        aggregate_share: None,
+                        report_count: 0,
+                        checksum: ReportIdChecksum::default(),
+                        aggregation_jobs_created: 1,
+                        aggregation_jobs_terminated: 0,
+                    },
+                ))
+                .await
+                .unwrap();
+
+                let lease = tx
+                    .acquire_incomplete_aggregation_jobs(&StdDuration::from_secs(60), 1)
+                    .await
+                    .unwrap()
+                    .remove(0);
+
+                Ok(lease)
+            })
+        })
+        .await
+        .unwrap();
+    assert_eq!(lease.leased().task_id(), task.id());
+    assert_eq!(lease.leased().aggregation_job_id(), &aggregation_job_id);
+
+    // Run.
+    let aggregation_job_driver = AggregationJobDriver::new(
+        reqwest::Client::builder().build().unwrap(),
+        LimitedRetryer::new(0),
+        &noop_meter(),
+        BATCH_AGGREGATION_SHARD_COUNT,
+        TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
+    );
+    aggregation_job_driver
+        .step_aggregation_job(
+            ds.clone(),
+            Arc::new(
+                HpkeKeypairCache::new(Arc::clone(&ds), HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL)
+                    .await
+                    .unwrap(),
+            ),
+            Arc::new(lease),
+        )
+        .await
+        .unwrap();
+
+    // Verify.
+    let want_aggregation_job = AggregationJob::<0, TimeInterval, dummy::Vdaf>::new(
+        *task.id(),
+        aggregation_job_id,
+        aggregation_param,
+        (),
+        Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
+        AggregationJobState::Finished,
+        AggregationJobStep::from(1),
+    );
+    let want_report_aggregation = ReportAggregation::<0, dummy::Vdaf>::new(
+        *task.id(),
+        aggregation_job_id,
+        *report_share.metadata().id(),
+        *report_share.metadata().time(),
+        0,
+        Some(PrepareResp::new(
+            *report_share.metadata().id(),
+            PrepareStepResult::Finished,
+        )),
+        ReportAggregationState::Finished,
+    );
+
+    let want_batch_aggregations =
+        Vec::from([BatchAggregation::<0, TimeInterval, dummy::Vdaf>::new(
+            *task.id(),
+            active_batch_identifier,
+            aggregation_param,
+            0,
+            Interval::from_time(report_share.metadata().time()).unwrap(),
+            BatchAggregationState::Aggregating {
+                aggregate_share: Some(transcript.helper_aggregate_share),
+                report_count: 1,
+                checksum: ReportIdChecksum::for_report_id(report_share.metadata().id()),
+                aggregation_jobs_created: 1,
+                aggregation_jobs_terminated: 1,
+            },
+        )]);
+
+    let (got_aggregation_job, got_report_aggregation, got_batch_aggregations) = ds
+        .run_unnamed_tx(|tx| {
+            let vdaf = Arc::clone(&vdaf);
+            let helper_task = helper_task.clone();
+            let report_metadata = report_share.metadata().clone();
+
+            Box::pin(async move {
+                let aggregation_job = tx
+                    .get_aggregation_job::<0, TimeInterval, dummy::Vdaf>(
+                        helper_task.id(),
+                        &aggregation_job_id,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let report_aggregation = tx
+                    .get_report_aggregation_by_report_id(
+                        vdaf.as_ref(),
+                        &Role::Helper,
+                        helper_task.id(),
+                        &aggregation_job_id,
+                        report_metadata.id(),
+                        &aggregation_param,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let batch_aggregations = merge_batch_aggregations_by_batch(
+                    tx.get_batch_aggregations_for_task::<0, TimeInterval, dummy::Vdaf>(
+                        &vdaf,
+                        helper_task.id(),
+                    )
+                    .await
+                    .unwrap(),
+                );
+
+                Ok((aggregation_job, report_aggregation, batch_aggregations))
+            })
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(want_aggregation_job, got_aggregation_job);
+    assert_eq!(want_report_aggregation, got_report_aggregation);
+    assert_eq!(want_batch_aggregations, got_batch_aggregations);
+
+    assert_task_aggregation_counter(&ds, *task.id(), TaskAggregationCounter::new_with_values(1))
+        .await;
+}
+
 struct CancelAggregationJobTestCase {
     task: AggregatorTask,
     vdaf: Arc<Prio3Count>,
-    aggregation_job: AggregationJob<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>,
+    aggregation_job: AggregationJob<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>,
     batch_identifier: Interval,
-    report_aggregation: ReportAggregation<VERIFY_KEY_LENGTH, Prio3Count>,
+    report_aggregation: ReportAggregation<VERIFY_KEY_LENGTH_PRIO3, Prio3Count>,
     _ephemeral_datastore: EphemeralDatastore,
     datastore: Arc<Datastore<MockClock>>,
     lease: Lease<AcquiredAggregationJob>,
@@ -4747,21 +5714,26 @@ async fn setup_cancel_aggregation_job_test() -> CancelAggregationJobTestCase {
     let clock = MockClock::default();
     let ephemeral_datastore = ephemeral_datastore().await;
     let datastore = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    datastore.put_hpke_key().await.unwrap();
     let vdaf = Arc::new(Prio3::new_count(2).unwrap());
     let mock_helper = mockito::Server::new_async().await;
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-        .with_helper_aggregator_endpoint(mock_helper.url().parse().unwrap())
-        .build()
-        .leader_view()
-        .unwrap();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .with_helper_aggregator_endpoint(mock_helper.url().parse().unwrap())
+    .build()
+    .leader_view()
+    .unwrap();
     let time = clock
         .now()
         .to_batch_interval_start(task.time_precision())
         .unwrap();
     let batch_identifier = TimeInterval::to_batch_identifier(&task, &(), &time).unwrap();
     let report_metadata = ReportMetadata::new(random(), time, Vec::new());
-    let verify_key: VerifyKey<VERIFY_KEY_LENGTH> = task.vdaf_verify_key().unwrap();
+    let verify_key: VerifyKey<VERIFY_KEY_LENGTH_PRIO3> = task.vdaf_verify_key().unwrap();
 
     let transcript = run_vdaf(
         vdaf.as_ref(),
@@ -4782,13 +5754,13 @@ async fn setup_cancel_aggregation_job_test() -> CancelAggregationJobTestCase {
     );
     let aggregation_job_id = random();
 
-    let aggregation_job = AggregationJob::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>::new(
+    let aggregation_job = AggregationJob::<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>::new(
         *task.id(),
         aggregation_job_id,
         (),
         (),
         Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1)).unwrap(),
-        AggregationJobState::InProgress,
+        AggregationJobState::Active,
         AggregationJobStep::from(0),
     );
     let report_aggregation = report.as_leader_init_report_aggregation(aggregation_job_id, 0);
@@ -4813,7 +5785,7 @@ async fn setup_cancel_aggregation_job_test() -> CancelAggregationJobTestCase {
                     .unwrap();
 
                 tx.put_batch_aggregation(&BatchAggregation::<
-                    VERIFY_KEY_LENGTH,
+                    VERIFY_KEY_LENGTH_PRIO3,
                     TimeInterval,
                     Prio3Count,
                 >::new(
@@ -4886,6 +5858,8 @@ async fn cancel_aggregation_job() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
         .abandon_aggregation_job(Arc::clone(&test_case.datastore), Arc::new(test_case.lease))
@@ -4927,7 +5901,7 @@ async fn cancel_aggregation_job() {
             );
             Box::pin(async move {
                 let aggregation_job = tx
-                    .get_aggregation_job::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>(
+                    .get_aggregation_job::<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>(
                         task.id(),
                         aggregation_job.id(),
                     )
@@ -4947,7 +5921,7 @@ async fn cancel_aggregation_job() {
                     .unwrap()
                     .unwrap();
                 let batch_aggregations = merge_batch_aggregations_by_batch(
-                    tx.get_batch_aggregations_for_task::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>(&vdaf, task.id())
+                    tx.get_batch_aggregations_for_task::<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>(&vdaf, task.id())
                         .await
                         .unwrap(),
                 );
@@ -4996,6 +5970,8 @@ async fn cancel_aggregation_job_helper_aggregation_job_deletion_fails() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     );
     aggregation_job_driver
         .abandon_aggregation_job(Arc::clone(&test_case.datastore), Arc::new(test_case.lease))
@@ -5013,16 +5989,21 @@ async fn abandon_failing_aggregation_job_with_retryable_error() {
     let mut runtime_manager = TestRuntimeManager::new();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let stopper = Stopper::new();
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
 
     let leader_task = task.leader_view().unwrap();
     let agg_auth_token = task.aggregator_auth_token();
     let aggregation_job_id = random();
-    let verify_key: VerifyKey<VERIFY_KEY_LENGTH> = task.vdaf_verify_key().unwrap();
+    let verify_key: VerifyKey<VERIFY_KEY_LENGTH_PRIO3> = task.vdaf_verify_key().unwrap();
 
     let helper_hpke_keypair = HpkeKeypair::test();
 
@@ -5061,18 +6042,20 @@ async fn abandon_failing_aggregation_job_with_retryable_error() {
                 .await
                 .unwrap();
 
-            tx.put_aggregation_job(
-                &AggregationJob::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>::new(
-                    *task.id(),
-                    aggregation_job_id,
-                    (),
-                    (),
-                    Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
-                        .unwrap(),
-                    AggregationJobState::InProgress,
-                    AggregationJobStep::from(0),
-                ),
-            )
+            tx.put_aggregation_job(&AggregationJob::<
+                VERIFY_KEY_LENGTH_PRIO3,
+                TimeInterval,
+                Prio3Count,
+            >::new(
+                *task.id(),
+                aggregation_job_id,
+                (),
+                (),
+                Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
+                    .unwrap(),
+                AggregationJobState::Active,
+                AggregationJobStep::from(0),
+            ))
             .await
             .unwrap();
 
@@ -5083,7 +6066,7 @@ async fn abandon_failing_aggregation_job_with_retryable_error() {
             .unwrap();
 
             tx.put_batch_aggregation(&BatchAggregation::<
-                VERIFY_KEY_LENGTH,
+                VERIFY_KEY_LENGTH_PRIO3,
                 TimeInterval,
                 Prio3Count,
             >::new(
@@ -5116,6 +6099,8 @@ async fn abandon_failing_aggregation_job_with_retryable_error() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     ));
     let job_driver = Arc::new(
         JobDriver::new(
@@ -5141,7 +6126,7 @@ async fn abandon_failing_aggregation_job_with_retryable_error() {
     let failure_mock = server
         .mock(
             "PUT",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -5160,7 +6145,7 @@ async fn abandon_failing_aggregation_job_with_retryable_error() {
     let no_more_requests_mock = server
         .mock(
             "PUT",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -5207,7 +6192,7 @@ async fn abandon_failing_aggregation_job_with_retryable_error() {
                     .unwrap()
                     .unwrap();
                 let got_batch_aggregations = merge_batch_aggregations_by_batch(
-                    tx.get_batch_aggregations_for_task::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>(&vdaf, task.id())
+                    tx.get_batch_aggregations_for_task::<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>(&vdaf, task.id())
                         .await
                         .unwrap(),
                 );
@@ -5219,7 +6204,7 @@ async fn abandon_failing_aggregation_job_with_retryable_error() {
         .unwrap();
     assert_eq!(
         got_aggregation_job,
-        AggregationJob::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>::new(
+        AggregationJob::<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>::new(
             *task.id(),
             aggregation_job_id,
             (),
@@ -5256,16 +6241,21 @@ async fn abandon_failing_aggregation_job_with_fatal_error() {
     let mut runtime_manager = TestRuntimeManager::new();
     let ephemeral_datastore = ephemeral_datastore().await;
     let ds = Arc::new(ephemeral_datastore.datastore(clock.clone()).await);
+    ds.put_hpke_key().await.unwrap();
     let stopper = Stopper::new();
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-        .with_helper_aggregator_endpoint(server.url().parse().unwrap())
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Prio3Count,
+    )
+    .with_helper_aggregator_endpoint(server.url().parse().unwrap())
+    .build();
 
     let leader_task = task.leader_view().unwrap();
     let agg_auth_token = task.aggregator_auth_token();
     let aggregation_job_id = random();
-    let verify_key: VerifyKey<VERIFY_KEY_LENGTH> = task.vdaf_verify_key().unwrap();
+    let verify_key: VerifyKey<VERIFY_KEY_LENGTH_PRIO3> = task.vdaf_verify_key().unwrap();
 
     let helper_hpke_keypair = HpkeKeypair::test();
 
@@ -5304,18 +6294,20 @@ async fn abandon_failing_aggregation_job_with_fatal_error() {
                 .await
                 .unwrap();
 
-            tx.put_aggregation_job(
-                &AggregationJob::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>::new(
-                    *task.id(),
-                    aggregation_job_id,
-                    (),
-                    (),
-                    Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
-                        .unwrap(),
-                    AggregationJobState::InProgress,
-                    AggregationJobStep::from(0),
-                ),
-            )
+            tx.put_aggregation_job(&AggregationJob::<
+                VERIFY_KEY_LENGTH_PRIO3,
+                TimeInterval,
+                Prio3Count,
+            >::new(
+                *task.id(),
+                aggregation_job_id,
+                (),
+                (),
+                Interval::new(Time::from_seconds_since_epoch(0), Duration::from_seconds(1))
+                    .unwrap(),
+                AggregationJobState::Active,
+                AggregationJobStep::from(0),
+            ))
             .await
             .unwrap();
 
@@ -5326,7 +6318,7 @@ async fn abandon_failing_aggregation_job_with_fatal_error() {
             .unwrap();
 
             tx.put_batch_aggregation(&BatchAggregation::<
-                VERIFY_KEY_LENGTH,
+                VERIFY_KEY_LENGTH_PRIO3,
                 TimeInterval,
                 Prio3Count,
             >::new(
@@ -5359,6 +6351,8 @@ async fn abandon_failing_aggregation_job_with_fatal_error() {
         &noop_meter(),
         BATCH_AGGREGATION_SHARD_COUNT,
         TASK_AGGREGATION_COUNTER_SHARD_COUNT,
+        HpkeKeypairCache::DEFAULT_REFRESH_INTERVAL,
+        DEFAULT_ASYNC_POLL_INTERVAL,
     ));
     let job_driver = Arc::new(
         JobDriver::new(
@@ -5384,7 +6378,7 @@ async fn abandon_failing_aggregation_job_with_fatal_error() {
     let failure_mock = server
         .mock(
             "PUT",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -5403,7 +6397,7 @@ async fn abandon_failing_aggregation_job_with_fatal_error() {
     let no_more_requests_mock = server
         .mock(
             "PUT",
-            task.aggregation_job_uri(&aggregation_job_id)
+            task.aggregation_job_uri(&aggregation_job_id, None)
                 .unwrap()
                 .path(),
         )
@@ -5444,7 +6438,7 @@ async fn abandon_failing_aggregation_job_with_fatal_error() {
                     .unwrap()
                     .unwrap();
                 let got_batch_aggregations = merge_batch_aggregations_by_batch(
-                    tx.get_batch_aggregations_for_task::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>(&vdaf, task.id())
+                    tx.get_batch_aggregations_for_task::<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>(&vdaf, task.id())
                         .await
                         .unwrap(),
                 );
@@ -5456,7 +6450,7 @@ async fn abandon_failing_aggregation_job_with_fatal_error() {
         .unwrap();
     assert_eq!(
         got_aggregation_job,
-        AggregationJob::<VERIFY_KEY_LENGTH, TimeInterval, Prio3Count>::new(
+        AggregationJob::<VERIFY_KEY_LENGTH_PRIO3, TimeInterval, Prio3Count>::new(
             *task.id(),
             aggregation_job_id,
             (),

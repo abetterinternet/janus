@@ -96,6 +96,7 @@
   peer_aggregator_endpoint: "https://example.org/"
   batch_mode: !LeaderSelected
     batch_time_window_size: null
+  aggregation_mode: Synchronous
   vdaf: Prio3Count
   role: Helper
   vdaf_verify_key: "ZXtE4kLqtsCOr8h_pNUeoQ"

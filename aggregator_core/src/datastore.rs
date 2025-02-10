@@ -13,7 +13,7 @@ use self::models::{
 use crate::VdafHasAggregationParameter;
 use crate::{
     batch_mode::{AccumulableBatchMode, CollectableBatchMode},
-    task::{self, AggregatorTask, AggregatorTaskParameters},
+    task::{self, AggregationMode, AggregatorTask, AggregatorTaskParameters},
     taskprov::PeerAggregator,
     SecretBytes, TIME_HISTOGRAM_BOUNDARIES,
 };
@@ -29,8 +29,8 @@ use janus_core::{
 use janus_messages::{
     batch_mode::{BatchMode, LeaderSelected, TimeInterval},
     AggregationJobId, BatchId, CollectionJobId, Duration, Extension, HpkeCiphertext, HpkeConfig,
-    HpkeConfigId, Interval, PrepareResp, Query, ReportId, ReportIdChecksum, ReportMetadata,
-    ReportShare, Role, TaskId, Time,
+    HpkeConfigId, Interval, PrepareContinue, PrepareInit, PrepareResp, Query, ReportId,
+    ReportIdChecksum, ReportMetadata, Role, TaskId, Time,
 };
 use models::UnaggregatedReport;
 use opentelemetry::{
@@ -658,15 +658,16 @@ WHERE success = TRUE ORDER BY version DESC LIMIT(1)",
             .prepare_cached(
                 "-- put_aggregator_task()
 INSERT INTO tasks (
-    task_id, aggregator_role, peer_aggregator_endpoint, batch_mode, vdaf,
-    task_start, task_end, report_expiry_age, min_batch_size, time_precision,
-    tolerable_clock_skew, collector_hpke_config, vdaf_verify_key,
-    taskprov_task_info, aggregator_auth_token_type, aggregator_auth_token,
-    aggregator_auth_token_hash, collector_auth_token_type,
-    collector_auth_token_hash, created_at, updated_at, updated_by)
+    task_id, aggregator_role, aggregation_mode, peer_aggregator_endpoint,
+    batch_mode, vdaf, task_start, task_end, report_expiry_age, min_batch_size,
+    time_precision, tolerable_clock_skew, collector_hpke_config,
+    vdaf_verify_key, taskprov_task_info, aggregator_auth_token_type,
+    aggregator_auth_token, aggregator_auth_token_hash,
+    collector_auth_token_type, collector_auth_token_hash, created_at,
+    updated_at, updated_by)
 VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-    $19, $20, $21, $22
+    $19, $20, $21, $22, $23
 )
 ON CONFLICT DO NOTHING",
             )
@@ -677,6 +678,7 @@ ON CONFLICT DO NOTHING",
                 &[
                     /* task_id */ &task.id().as_ref(),
                     /* aggregator_role */ &AggregatorRole::from_role(*task.role())?,
+                    /* aggregation_mode */ &task.aggregation_mode().copied(),
                     /* peer_aggregator_endpoint */
                     &task.peer_aggregator_endpoint().as_str(),
                     /* batch_mode */ &Json(task.batch_mode()),
@@ -814,11 +816,12 @@ UPDATE tasks SET task_end = $1, updated_at = $2, updated_by = $3
             .prepare_cached(
                 "-- get_aggregator_task()
 SELECT
-    aggregator_role, peer_aggregator_endpoint, batch_mode, vdaf, task_start,
-    task_end, report_expiry_age, min_batch_size, time_precision,
-    tolerable_clock_skew, collector_hpke_config, vdaf_verify_key,
-    taskprov_task_info, aggregator_auth_token_type, aggregator_auth_token,
-    aggregator_auth_token_hash, collector_auth_token_type, collector_auth_token_hash
+    aggregator_role, aggregation_mode, peer_aggregator_endpoint, batch_mode,
+    vdaf, task_start, task_end, report_expiry_age, min_batch_size,
+    time_precision, tolerable_clock_skew, collector_hpke_config,
+    vdaf_verify_key, taskprov_task_info, aggregator_auth_token_type,
+    aggregator_auth_token, aggregator_auth_token_hash,
+    collector_auth_token_type, collector_auth_token_hash
 FROM tasks WHERE task_id = $1",
             )
             .await?;
@@ -836,11 +839,12 @@ FROM tasks WHERE task_id = $1",
             .prepare_cached(
                 "-- get_aggregator_tasks()
 SELECT
-    task_id, aggregator_role, peer_aggregator_endpoint, batch_mode, vdaf, task_start,
-    task_end, report_expiry_age, min_batch_size, time_precision,
-    tolerable_clock_skew, collector_hpke_config, vdaf_verify_key,
-    taskprov_task_info, aggregator_auth_token_type, aggregator_auth_token,
-    aggregator_auth_token_hash, collector_auth_token_type, collector_auth_token_hash
+    task_id, aggregator_role, aggregation_mode, peer_aggregator_endpoint,
+    batch_mode, vdaf, task_start, task_end, report_expiry_age, min_batch_size,
+    time_precision, tolerable_clock_skew, collector_hpke_config,
+    vdaf_verify_key, taskprov_task_info, aggregator_auth_token_type,
+    aggregator_auth_token, aggregator_auth_token_hash,
+    collector_auth_token_type, collector_auth_token_hash
 FROM tasks",
             )
             .await?;
@@ -858,6 +862,7 @@ FROM tasks",
         let aggregator_role: AggregatorRole = row.get("aggregator_role");
         let peer_aggregator_endpoint = row.get::<_, String>("peer_aggregator_endpoint").parse()?;
         let batch_mode = row.try_get::<_, Json<task::BatchMode>>("batch_mode")?.0;
+        let aggregation_mode: Option<AggregationMode> = row.get("aggregation_mode");
         let vdaf = row.try_get::<_, Json<VdafInstance>>("vdaf")?.0;
         let task_start = row
             .get::<_, Option<NaiveDateTime>>("task_start")
@@ -920,6 +925,7 @@ FROM tasks",
 
         let aggregator_parameters = match (
             aggregator_role,
+            aggregation_mode,
             aggregator_auth_token,
             aggregator_auth_token_hash,
             collector_auth_token_hash,
@@ -927,6 +933,7 @@ FROM tasks",
         ) {
             (
                 AggregatorRole::Leader,
+                None,
                 Some(aggregator_auth_token),
                 None,
                 Some(collector_auth_token_hash),
@@ -938,6 +945,7 @@ FROM tasks",
             },
             (
                 AggregatorRole::Helper,
+                Some(aggregation_mode),
                 None,
                 Some(aggregator_auth_token_hash),
                 None,
@@ -945,9 +953,10 @@ FROM tasks",
             ) => AggregatorTaskParameters::Helper {
                 aggregator_auth_token_hash,
                 collector_hpke_config,
+                aggregation_mode,
             },
-            (AggregatorRole::Helper, None, None, None, None) => {
-                AggregatorTaskParameters::TaskprovHelper
+            (AggregatorRole::Helper, Some(aggregation_mode), None, None, None, None) => {
+                AggregatorTaskParameters::TaskprovHelper { aggregation_mode }
             }
             values => {
                 return Err(Error::DbState(format!(
@@ -1671,12 +1680,13 @@ WHERE task_id = $1
         );
     }
 
-    /// put_scrubbed_report stores a scrubbed report, given its associated task ID & report share.
+    /// put_scrubbed_report stores a scrubbed report, given its associated task ID & identifiers.
     #[tracing::instrument(skip(self), err(level = Level::DEBUG))]
     pub async fn put_scrubbed_report(
         &self,
         task_id: &TaskId,
-        report_share: &ReportShare,
+        report_id: &ReportId,
+        client_timestamp: &Time,
     ) -> Result<(), Error> {
         let task_info = match self.task_info_for(task_id).await? {
             Some(task_info) => task_info,
@@ -1713,9 +1723,8 @@ WHERE client_reports.client_timestamp < $7",
                 &stmt,
                 &[
                     /* task_id */ &task_info.pkey,
-                    /* report_id */ &report_share.metadata().id().as_ref(),
-                    /* client_timestamp */
-                    &report_share.metadata().time().as_naive_date_time()?,
+                    /* report_id */ &report_id.as_ref(),
+                    /* client_timestamp */ &client_timestamp.as_naive_date_time()?,
                     /* created_at */ &now,
                     /* updated_at */ &now,
                     /* updated_by */ &self.name,
@@ -1873,8 +1882,7 @@ WHERE aggregation_jobs.task_id = $1
 WITH incomplete_jobs AS (
     SELECT aggregation_jobs.id FROM aggregation_jobs
     JOIN tasks ON tasks.id = aggregation_jobs.task_id
-    WHERE tasks.aggregator_role = 'LEADER'
-    AND aggregation_jobs.state = 'IN_PROGRESS'
+    WHERE aggregation_jobs.state = 'ACTIVE'
     AND aggregation_jobs.lease_expiry <= $2
     AND UPPER(aggregation_jobs.client_timestamp_interval) >=
         COALESCE($2::TIMESTAMP - tasks.report_expiry_age * '1 second'::INTERVAL,
@@ -1915,6 +1923,7 @@ RETURNING tasks.task_id, tasks.batch_mode, tasks.vdaf,
             let vdaf = row.try_get::<_, Json<VdafInstance>>("vdaf")?.0;
             let lease_token = row.get_bytea_and_convert::<LeaseToken>("lease_token")?;
             let lease_attempts = row.get_bigint_and_convert("lease_attempts")?;
+
             Ok(Lease::new(
                 AcquiredAggregationJob::new(task_id, aggregation_job_id, batch_mode, vdaf),
                 lease_expiry_time,
@@ -2122,7 +2131,8 @@ SELECT
     report_aggregations.state, public_extensions, public_share,
     leader_private_extensions, leader_input_share,
     helper_encrypted_input_share, leader_prep_transition, leader_prep_state,
-    leader_output_share, helper_prep_state, error_code
+    leader_output_share, prepare_init, require_taskbind_extension,
+    helper_prep_state, prepare_continue, error_code
 FROM report_aggregations
 JOIN aggregation_jobs ON aggregation_jobs.id = report_aggregations.aggregation_job_id
 WHERE report_aggregations.task_id = $1
@@ -2186,7 +2196,8 @@ SELECT
     ord, client_timestamp, last_prep_resp, report_aggregations.state,
     public_extensions, public_share, leader_private_extensions,
     leader_input_share, helper_encrypted_input_share, leader_prep_transition,
-    leader_prep_state, leader_output_share, helper_prep_state, error_code
+    leader_prep_state, leader_output_share, prepare_init,
+    require_taskbind_extension, helper_prep_state, prepare_continue, error_code
 FROM report_aggregations
 JOIN aggregation_jobs
     ON aggregation_jobs.id = report_aggregations.aggregation_job_id
@@ -2251,7 +2262,8 @@ SELECT
     client_timestamp, last_prep_resp, report_aggregations.state,
     public_extensions, public_share, leader_private_extensions,
     leader_input_share, helper_encrypted_input_share, leader_prep_transition,
-    leader_prep_state, leader_output_share, helper_prep_state, error_code
+    leader_prep_state, leader_output_share, prepare_init,
+    require_taskbind_extension, helper_prep_state, prepare_continue, error_code
 FROM report_aggregations
 JOIN aggregation_jobs ON aggregation_jobs.id = report_aggregations.aggregation_job_id
 WHERE report_aggregations.task_id = $1
@@ -2370,6 +2382,31 @@ WHERE report_aggregations.task_id = $1
                 }
             }
 
+            ReportAggregationStateCode::InitProcessing => {
+                let prepare_init_bytes =
+                    row.get::<_, Option<Vec<u8>>>("prepare_init")
+                        .ok_or_else(|| {
+                            Error::DbState(
+                            "report aggregation in state INIT_PROCESSING but prepare_init is NULL"
+                                .to_string(),
+                        )
+                        })?;
+                let require_taskbind_extension = row.get::<_, Option<bool>>("require_taskbind_extension")
+                        .ok_or_else(|| {
+                            Error::DbState(
+                                "report aggregation in state INIT_PROCESSING but require_taskbind_extension is NULL"
+                                    .to_string(),
+                            )
+                        })?;
+
+                let prepare_init = PrepareInit::get_decoded(&prepare_init_bytes)?;
+
+                ReportAggregationState::HelperInitProcessing {
+                    prepare_init,
+                    require_taskbind_extension,
+                }
+            }
+
             ReportAggregationStateCode::Continue => {
                 match role {
                     Role::Leader => {
@@ -2377,7 +2414,7 @@ WHERE report_aggregations.task_id = $1
                             .get::<_, Option<Vec<u8>>>("leader_prep_transition")
                             .ok_or_else(|| {
                                 Error::DbState(
-                                    "report aggregation in state WAITING but leader_prep_transition is NULL"
+                                    "report aggregation in state CONTINUE but leader_prep_transition is NULL"
                                         .to_string(),
                                 )
                             })?;
@@ -2395,7 +2432,7 @@ WHERE report_aggregations.task_id = $1
                             .get::<_, Option<Vec<u8>>>("helper_prep_state")
                             .ok_or_else(|| {
                                 Error::DbState(
-                                    "report aggregation in state WAITING but helper_prep_state is NULL"
+                                    "report aggregation in state CONTINUE but helper_prep_state is NULL"
                                         .to_string(),
                                 )
                             })?;
@@ -2407,6 +2444,36 @@ WHERE report_aggregations.task_id = $1
                         ReportAggregationState::HelperContinue { prepare_state }
                     }
                     _ => panic!("unexpected role"),
+                }
+            }
+
+            ReportAggregationStateCode::ContinueProcessing => {
+                let helper_prep_state_bytes = row
+                    .get::<_, Option<Vec<u8>>>("helper_prep_state")
+                    .ok_or_else(|| {
+                        Error::DbState(
+                            "report aggregation in state CONTINUE_PROCESSING but helper_prep_state is NULL"
+                                .to_string(),
+                        )
+                    })?;
+                let prepare_continue_bytes = row
+                    .get::<_, Option<Vec<u8>>>("prepare_continue")
+                    .ok_or_else(|| {
+                        Error::DbState(
+                            "report aggregation in state CONTINUE_PROCESSING but message is NULL"
+                                .to_string(),
+                        )
+                    })?;
+
+                let prepare_state = A::PrepareState::get_decoded_with_param(
+                    &(vdaf, 1 /* helper */),
+                    &helper_prep_state_bytes,
+                )?;
+                let prepare_continue = PrepareContinue::get_decoded(&prepare_continue_bytes)?;
+
+                ReportAggregationState::HelperContinueProcessing {
+                    prepare_state,
+                    prepare_continue,
                 }
             }
 
@@ -2507,10 +2574,12 @@ INSERT INTO report_aggregations
     last_prep_resp, state, public_extensions, public_share,
     leader_private_extensions, leader_input_share,
     helper_encrypted_input_share, leader_prep_transition, leader_prep_state,
-    leader_output_share, helper_prep_state, error_code, created_at, updated_at, updated_by)
+    leader_output_share, prepare_init, require_taskbind_extension,
+    helper_prep_state, prepare_continue, error_code, created_at, updated_at,
+    updated_by)
 SELECT
     $1, aggregation_jobs.id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-    $15, $16, $17, $18, $19, $20
+    $15, $16, $17, $18, $19, $20, $21, $22, $23
 FROM aggregation_jobs
 WHERE task_id = $1
   AND aggregation_job_id = $2
@@ -2520,20 +2589,22 @@ ON CONFLICT(task_id, aggregation_job_id, ord) DO UPDATE
         public_extensions, public_share, leader_private_extensions,
         leader_input_share, helper_encrypted_input_share,
         leader_prep_transition, leader_prep_state, leader_output_share,
-        helper_prep_state, error_code, created_at, updated_at, updated_by
+        prepare_init, require_taskbind_extension, helper_prep_state,
+        prepare_continue, error_code, created_at, updated_at, updated_by
     ) = (
         excluded.client_report_id, excluded.client_timestamp,
         excluded.last_prep_resp, excluded.state, excluded.public_extensions,
         excluded.public_share, excluded.leader_private_extensions,
         excluded.leader_input_share, excluded.helper_encrypted_input_share,
         excluded.leader_prep_transition, excluded.leader_prep_state,
-        excluded.leader_output_share, excluded.helper_prep_state,
-        excluded.error_code, excluded.created_at, excluded.updated_at,
-        excluded.updated_by
+        excluded.leader_output_share, excluded.prepare_init,
+        excluded.require_taskbind_extension, excluded.helper_prep_state,
+        excluded.prepare_continue, excluded.error_code, excluded.created_at,
+        excluded.updated_at, excluded.updated_by
     )
     WHERE (SELECT UPPER(client_timestamp_interval)
            FROM aggregation_jobs
-           WHERE id = report_aggregations.aggregation_job_id) >= $21",
+           WHERE id = report_aggregations.aggregation_job_id) >= $24",
             )
             .await?;
         check_insert(
@@ -2559,7 +2630,11 @@ ON CONFLICT(task_id, aggregation_job_id, ord) DO UPDATE
                     &encoded_state_values.leader_prep_transition,
                     /* leader_prep_state */ &encoded_state_values.leader_prep_state,
                     /* leader_output_share */ &encoded_state_values.leader_output_share,
+                    /* prepare_init */ &encoded_state_values.prepare_init,
+                    /* require_taskbind_extension */
+                    &encoded_state_values.require_taskbind_extension,
                     /* helper_prep_state */ &encoded_state_values.helper_prep_state,
+                    /* prepare_continue */ &encoded_state_values.prepare_continue,
                     /* error_code */ &encoded_state_values.report_error,
                     /* created_at */ &now,
                     /* updated_at */ &now,
@@ -2615,14 +2690,17 @@ ON CONFLICT(task_id, aggregation_job_id, ord) DO UPDATE
         client_report_id, client_timestamp, last_prep_resp, state,
         public_extensions, public_share, leader_private_extensions,
         leader_input_share, helper_encrypted_input_share,
-        leader_prep_transition, helper_prep_state, error_code, created_at,
-        updated_at, updated_by
+        leader_prep_transition, leader_prep_state, leader_output_share,
+        prepare_init, helper_prep_state, prepare_continue, error_code,
+        created_at, updated_at, updated_by
     ) = (
         excluded.client_report_id, excluded.client_timestamp,
         excluded.last_prep_resp, excluded.state, excluded.public_extensions,
         excluded.public_share, excluded.leader_private_extensions,
         excluded.leader_input_share, excluded.helper_encrypted_input_share,
-        excluded.leader_prep_transition, excluded.helper_prep_state,
+        excluded.leader_prep_transition, excluded.leader_prep_state,
+        excluded.leader_output_share, excluded.prepare_init,
+        excluded.helper_prep_state, excluded.prepare_continue,
         excluded.error_code, excluded.created_at, excluded.updated_at,
         excluded.updated_by
     )
@@ -2674,14 +2752,17 @@ ON CONFLICT(task_id, aggregation_job_id, ord) DO UPDATE
         client_report_id, client_timestamp, last_prep_resp, state,
         public_extensions, public_share, leader_private_extensions,
         leader_input_share, helper_encrypted_input_share,
-        leader_prep_transition, helper_prep_state, error_code, created_at,
-        updated_at, updated_by
+        leader_prep_transition, leader_prep_state, leader_output_share,
+        prepare_init, helper_prep_state, prepare_continue, error_code,
+        created_at, updated_at, updated_by
     ) = (
         excluded.client_report_id, excluded.client_timestamp,
         excluded.last_prep_resp, excluded.state, excluded.public_extensions,
         excluded.public_share, excluded.leader_private_extensions,
         excluded.leader_input_share, excluded.helper_encrypted_input_share,
-        excluded.leader_prep_transition, excluded.helper_prep_state,
+        excluded.leader_prep_transition, excluded.leader_prep_state,
+        excluded.leader_output_share, excluded.prepare_init,
+        excluded.helper_prep_state, excluded.prepare_continue,
         excluded.error_code, excluded.created_at, excluded.updated_at,
         excluded.updated_by
     )
@@ -2747,18 +2828,19 @@ SET
     last_prep_resp = $1, state = $2, public_extensions = $3, public_share = $4,
     leader_private_extensions = $5, leader_input_share = $6,
     helper_encrypted_input_share = $7, leader_prep_transition = $8,
-    leader_prep_state = $9, leader_output_share = $10,
-    helper_prep_state = $11, error_code = $12, updated_at = $13,
-    updated_by = $14
+    leader_prep_state = $9, leader_output_share = $10, prepare_init = $11,
+    require_taskbind_extension = $12, helper_prep_state = $13,
+    prepare_continue = $14, error_code = $15, updated_at = $16,
+    updated_by = $17
 FROM aggregation_jobs
 WHERE report_aggregations.aggregation_job_id = aggregation_jobs.id
-  AND aggregation_jobs.aggregation_job_id = $15
-  AND aggregation_jobs.task_id = $16
-  AND report_aggregations.task_id = $16
-  AND report_aggregations.client_report_id = $17
-  AND report_aggregations.client_timestamp = $18
-  AND report_aggregations.ord = $19
-  AND UPPER(aggregation_jobs.client_timestamp_interval) >= $20",
+  AND aggregation_jobs.aggregation_job_id = $18
+  AND aggregation_jobs.task_id = $19
+  AND report_aggregations.task_id = $19
+  AND report_aggregations.client_report_id = $20
+  AND report_aggregations.client_timestamp = $21
+  AND report_aggregations.ord = $22
+  AND UPPER(aggregation_jobs.client_timestamp_interval) >= $23",
             )
             .await?;
         check_single_row_mutation(
@@ -2778,7 +2860,11 @@ WHERE report_aggregations.aggregation_job_id = aggregation_jobs.id
                     &encoded_state_values.leader_prep_transition,
                     /* leader_prep_state */ &encoded_state_values.leader_prep_state,
                     /* leader_output_share */ &encoded_state_values.leader_output_share,
+                    /* prepare_init */ &encoded_state_values.prepare_init,
+                    /* require_taskbind_extension */
+                    &encoded_state_values.require_taskbind_extension,
                     /* helper_prep_state */ &encoded_state_values.helper_prep_state,
+                    /* prepare_continue */ &encoded_state_values.prepare_continue,
                     /* error_code */ &encoded_state_values.report_error,
                     /* updated_at */ &now,
                     /* updated_by */ &self.name,
@@ -5038,7 +5124,7 @@ INSERT INTO hpke_keys
         let stmt = self
             .prepare_cached(
                 "-- get_taskprov_peer_aggregators()
-SELECT id, endpoint, role, verify_key_init, collector_hpke_config,
+SELECT id, endpoint, peer_role, aggregation_mode, verify_key_init, collector_hpke_config,
         report_expiry_age, tolerable_clock_skew
     FROM taskprov_peer_aggregators",
             )
@@ -5119,9 +5205,9 @@ ord, type, token FROM taskprov_collector_auth_tokens AS a
         let stmt = self
             .prepare_cached(
                 "-- get_taskprov_peer_aggregator()
-SELECT endpoint, role, verify_key_init, collector_hpke_config,
+SELECT endpoint, peer_role, aggregation_mode, verify_key_init, collector_hpke_config,
         report_expiry_age, tolerable_clock_skew
-    FROM taskprov_peer_aggregators WHERE endpoint = $1 AND role = $2",
+    FROM taskprov_peer_aggregators WHERE endpoint = $1 AND peer_role = $2",
             )
             .await?;
         let peer_aggregator_row = self.query_opt(&stmt, params);
@@ -5131,7 +5217,7 @@ SELECT endpoint, role, verify_key_init, collector_hpke_config,
                 "-- get_taskprov_peer_aggregator()
 SELECT ord, type, token FROM taskprov_aggregator_auth_tokens
     WHERE peer_aggregator_id = (SELECT id FROM taskprov_peer_aggregators
-        WHERE endpoint = $1 AND role = $2)
+        WHERE endpoint = $1 AND peer_role = $2)
     ORDER BY ord ASC",
             )
             .await?;
@@ -5142,7 +5228,7 @@ SELECT ord, type, token FROM taskprov_aggregator_auth_tokens
                 "-- get_taskprov_peer_aggregator()
 SELECT ord, type, token FROM taskprov_collector_auth_tokens
     WHERE peer_aggregator_id = (SELECT id FROM taskprov_peer_aggregators
-        WHERE endpoint = $1 AND role = $2)
+        WHERE endpoint = $1 AND peer_role = $2)
     ORDER BY ord ASC",
             )
             .await?;
@@ -5172,7 +5258,8 @@ SELECT ord, type, token FROM taskprov_collector_auth_tokens
     ) -> Result<PeerAggregator, Error> {
         let endpoint = Url::parse(peer_aggregator_row.get::<_, &str>("endpoint"))?;
         let endpoint_bytes = endpoint.as_str().as_ref();
-        let role: AggregatorRole = peer_aggregator_row.get("role");
+        let peer_role: AggregatorRole = peer_aggregator_row.get("peer_role");
+        let aggregation_mode: Option<AggregationMode> = peer_aggregator_row.get("aggregation_mode");
         let report_expiry_age = peer_aggregator_row
             .get_nullable_bigint_and_convert("report_expiry_age")?
             .map(Duration::from_seconds);
@@ -5203,7 +5290,7 @@ SELECT ord, type, token FROM taskprov_collector_auth_tokens
 
                     let mut row_id = Vec::new();
                     row_id.extend_from_slice(endpoint_bytes);
-                    row_id.extend_from_slice(&role.as_role().get_encoded()?);
+                    row_id.extend_from_slice(&peer_role.as_role().get_encoded()?);
                     row_id.extend_from_slice(&ord.to_be_bytes());
 
                     auth_token_type.as_authentication(&self.crypter.decrypt(
@@ -5225,7 +5312,8 @@ SELECT ord, type, token FROM taskprov_collector_auth_tokens
 
         Ok(PeerAggregator::new(
             endpoint,
-            role.as_role(),
+            peer_role.as_role(),
+            aggregation_mode,
             verify_key_init,
             collector_hpke_config,
             report_expiry_age,
@@ -5241,7 +5329,7 @@ SELECT ord, type, token FROM taskprov_collector_auth_tokens
         peer_aggregator: &PeerAggregator,
     ) -> Result<(), Error> {
         let endpoint = peer_aggregator.endpoint().as_str();
-        let role = &AggregatorRole::from_role(*peer_aggregator.role())?;
+        let peer_role = &AggregatorRole::from_role(*peer_aggregator.peer_role())?;
         let encrypted_verify_key_init = self.crypter.encrypt(
             "taskprov_peer_aggregator",
             endpoint.as_ref(),
@@ -5253,9 +5341,9 @@ SELECT ord, type, token FROM taskprov_collector_auth_tokens
             .prepare_cached(
                 "-- put_taskprov_peer_aggregator()
 INSERT INTO taskprov_peer_aggregators (
-    endpoint, role, verify_key_init, tolerable_clock_skew, report_expiry_age,
+    endpoint, peer_role, aggregation_mode, verify_key_init, tolerable_clock_skew, report_expiry_age,
     collector_hpke_config, created_at, updated_by
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT DO NOTHING",
             )
             .await?;
@@ -5264,7 +5352,8 @@ ON CONFLICT DO NOTHING",
                 &stmt,
                 &[
                     /* endpoint */ &endpoint,
-                    /* role */ role,
+                    /* peer_role */ peer_role,
+                    /* aggregation_mode */ &peer_aggregator.aggregation_mode(),
                     /* verify_key_init */ &encrypted_verify_key_init,
                     /* tolerable_clock_skew */
                     &i64::try_from(peer_aggregator.tolerable_clock_skew().as_seconds())?,
@@ -5293,7 +5382,7 @@ ON CONFLICT DO NOTHING",
 
                 let mut row_id = Vec::new();
                 row_id.extend_from_slice(endpoint.as_ref());
-                row_id.extend_from_slice(&role.as_role().get_encoded()?);
+                row_id.extend_from_slice(&peer_role.as_role().get_encoded()?);
                 row_id.extend_from_slice(&ord.to_be_bytes());
 
                 let encrypted_auth_token =
@@ -5319,13 +5408,13 @@ INSERT INTO taskprov_aggregator_auth_tokens (
     peer_aggregator_id, created_at, updated_by, ord, type, token
 )
 SELECT
-    (SELECT id FROM taskprov_peer_aggregators WHERE endpoint = $1 AND role = $2),
+    (SELECT id FROM taskprov_peer_aggregators WHERE endpoint = $1 AND peer_role = $2),
     $3, $4, * FROM UNNEST($5::BIGINT[], $6::AUTH_TOKEN_TYPE[], $7::BYTEA[])",
             )
             .await?;
         let aggregator_auth_tokens_params: &[&(dyn ToSql + Sync)] = &[
             /* endpoint */ &endpoint,
-            /* role */ role,
+            /* peer_role */ peer_role,
             /* created_at */ &self.clock.now().as_naive_date_time()?,
             /* updated_by */ &self.name,
             /* ords */ &aggregator_auth_token_ords,
@@ -5346,13 +5435,13 @@ INSERT INTO taskprov_collector_auth_tokens (
     peer_aggregator_id, created_at, updated_by, ord,  type, token
 )
 SELECT
-    (SELECT id FROM taskprov_peer_aggregators WHERE endpoint = $1 AND role = $2),
+    (SELECT id FROM taskprov_peer_aggregators WHERE endpoint = $1 AND peer_role = $2),
     $3, $4, * FROM UNNEST($5::BIGINT[], $6::AUTH_TOKEN_TYPE[], $7::BYTEA[])",
             )
             .await?;
         let collector_auth_tokens_params: &[&(dyn ToSql + Sync)] = &[
             /* endpoint */ &endpoint,
-            /* role */ role,
+            /* peer_role */ peer_role,
             /* created_at */ &self.clock.now().as_naive_date_time()?,
             /* updated_by */ &self.name,
             /* ords */ &collector_auth_token_ords,
@@ -5369,19 +5458,19 @@ SELECT
     pub async fn delete_taskprov_peer_aggregator(
         &self,
         aggregator_url: &Url,
-        role: &Role,
+        peer_role: &Role,
     ) -> Result<(), Error> {
         let aggregator_url = aggregator_url.as_str();
-        let role = AggregatorRole::from_role(*role)?;
+        let peer_role = AggregatorRole::from_role(*peer_role)?;
 
         // Deletion of other data implemented via ON DELETE CASCADE.
         let stmt = self
             .prepare_cached(
                 "-- delete_taskprov_peer_aggregator()
-DELETE FROM taskprov_peer_aggregators WHERE endpoint = $1 AND role = $2",
+DELETE FROM taskprov_peer_aggregators WHERE endpoint = $1 AND peer_role = $2",
             )
             .await?;
-        check_single_row_mutation(self.execute(&stmt, &[&aggregator_url, &role]).await?)
+        check_single_row_mutation(self.execute(&stmt, &[&aggregator_url, &peer_role]).await?)
     }
 
     /// Get the [`TaskUploadCounter`] for a task. This is aggregated across all shards. Returns

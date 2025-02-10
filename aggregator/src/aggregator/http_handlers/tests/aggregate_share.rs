@@ -9,7 +9,7 @@ use janus_aggregator_core::{
     datastore::models::{BatchAggregation, BatchAggregationState},
     task::{
         test_util::{Task, TaskBuilder},
-        BatchMode,
+        AggregationMode, BatchMode,
     },
 };
 use janus_core::{
@@ -58,7 +58,12 @@ async fn aggregate_share_request_to_leader() {
     } = HttpHandlerTest::new().await;
 
     // Prepare parameters.
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 }).build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 1 },
+    )
+    .build();
     let leader_task = task.leader_view().unwrap();
     datastore.put_aggregator_task(&leader_task).await.unwrap();
 
@@ -97,9 +102,13 @@ async fn aggregate_share_request_invalid_batch_interval() {
 
     // Prepare parameters.
     const REPORT_EXPIRY_AGE: Duration = Duration::from_seconds(3600);
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-        .with_report_expiry_age(Some(REPORT_EXPIRY_AGE))
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 1 },
+    )
+    .with_report_expiry_age(Some(REPORT_EXPIRY_AGE))
+    .build();
     let helper_task = task.helper_view().unwrap();
     datastore.put_aggregator_task(&helper_task).await.unwrap();
 
@@ -159,10 +168,14 @@ async fn aggregate_share_request() {
         ..
     } = HttpHandlerTest::new().await;
 
-    let task = TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Fake { rounds: 1 })
-        .with_time_precision(Duration::from_seconds(500))
-        .with_min_batch_size(10)
-        .build();
+    let task = TaskBuilder::new(
+        BatchMode::TimeInterval,
+        AggregationMode::Synchronous,
+        VdafInstance::Fake { rounds: 1 },
+    )
+    .with_time_precision(Duration::from_seconds(500))
+    .with_min_batch_size(10)
+    .build();
     let helper_task = task.helper_view().unwrap();
     datastore.put_aggregator_task(&helper_task).await.unwrap();
 

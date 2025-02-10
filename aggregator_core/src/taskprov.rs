@@ -1,4 +1,7 @@
-use crate::{task::Error, SecretBytes};
+use crate::{
+    task::{AggregationMode, Error},
+    SecretBytes,
+};
 use aws_lc_rs::{
     digest::{self, digest, Digest, SHA256},
     hkdf::{KeyType, Salt, HKDF_SHA256},
@@ -105,7 +108,11 @@ pub struct PeerAggregator {
 
     /// The role that the peer aggregator takes in DAP. Must be [`Role::Leader`] or [`Role::Helper`].
     /// This, along with `endpoint`, uniquely represents the peer aggregator.
-    role: Role,
+    peer_role: Role,
+
+    /// The aggregation mode (e.g. synchronous vs asynchronous) to use for aggregation in any tasks
+    /// associated with this aggregator. Populated only when we are in the Helper role.
+    aggregation_mode: Option<AggregationMode>,
 
     /// The preshared key used to derive the VDAF verify key for each task.
     verify_key_init: VerifyKeyInit,
@@ -134,7 +141,8 @@ impl PeerAggregator {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         endpoint: Url,
-        role: Role,
+        peer_role: Role,
+        aggregation_mode: Option<AggregationMode>,
         verify_key_init: VerifyKeyInit,
         collector_hpke_config: HpkeConfig,
         report_expiry_age: Option<Duration>,
@@ -144,7 +152,8 @@ impl PeerAggregator {
     ) -> Self {
         Self {
             endpoint,
-            role,
+            peer_role,
+            aggregation_mode,
             verify_key_init,
             collector_hpke_config,
             report_expiry_age,
@@ -160,8 +169,14 @@ impl PeerAggregator {
     }
 
     /// Retrieve the role of the peer.
-    pub fn role(&self) -> &Role {
-        &self.role
+    pub fn peer_role(&self) -> &Role {
+        &self.peer_role
+    }
+
+    /// Retrieves the aggregation mode (e.g. synchronous vs asynchronous) to use for aggregation
+    /// in any tasks associated with this aggregator. Populated only when we are in the Helper role.
+    pub fn aggregation_mode(&self) -> Option<&AggregationMode> {
+        self.aggregation_mode.as_ref()
     }
 
     /// Retrieve the VDAF verify key initialization parameter, used for derivation of the VDAF
@@ -276,12 +291,14 @@ pub fn taskprov_task_id(encoded_task_config: &[u8]) -> TaskId {
 #[cfg(feature = "test-util")]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 pub mod test_util {
+    use crate::{
+        task::AggregationMode,
+        taskprov::{PeerAggregator, VerifyKeyInit},
+    };
     use janus_core::{auth_tokens::AuthenticationToken, hpke::HpkeKeypair};
     use janus_messages::{Duration, HpkeConfig, Role};
     use rand::random;
     use url::Url;
-
-    use super::{PeerAggregator, VerifyKeyInit};
 
     #[derive(Debug, Clone)]
     pub struct PeerAggregatorBuilder(PeerAggregator);
@@ -291,6 +308,7 @@ pub mod test_util {
             Self(PeerAggregator::new(
                 Url::parse("https://example.com").unwrap(),
                 Role::Leader,
+                Some(AggregationMode::Synchronous),
                 random(),
                 HpkeKeypair::test().config().clone(),
                 None,
@@ -304,8 +322,18 @@ pub mod test_util {
             Self(PeerAggregator { endpoint, ..self.0 })
         }
 
-        pub fn with_role(self, role: Role) -> Self {
-            Self(PeerAggregator { role, ..self.0 })
+        pub fn with_peer_role(self, peer_role: Role) -> Self {
+            Self(PeerAggregator {
+                peer_role,
+                ..self.0
+            })
+        }
+
+        pub fn with_aggregation_mode(self, aggregation_mode: Option<AggregationMode>) -> Self {
+            Self(PeerAggregator {
+                aggregation_mode,
+                ..self.0
+            })
         }
 
         pub fn with_verify_key_init(self, verify_key_init: VerifyKeyInit) -> Self {

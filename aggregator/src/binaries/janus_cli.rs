@@ -11,7 +11,7 @@ use clap::Parser;
 use janus_aggregator_api::git_revision;
 use janus_aggregator_core::{
     datastore::{self, models::HpkeKeyState, Datastore},
-    task::{AggregatorTask, SerializedAggregatorTask},
+    task::{AggregationMode, AggregatorTask, SerializedAggregatorTask},
     taskprov::{PeerAggregator, VerifyKeyInit},
 };
 use janus_core::{
@@ -126,9 +126,13 @@ enum Command {
         #[arg(long)]
         peer_endpoint: Url,
 
-        /// This aggregator's role.
+        /// The peer aggregator's role.
         #[arg(long)]
-        role: Role,
+        peer_role: Role,
+
+        /// The aggregation mode to use. Specified only if this aggregator is the Helper.
+        #[arg(long)]
+        aggregation_mode: Option<AggregationMode>,
 
         /// The taskprov verify_key_init value, in unpadded base64url.
         #[arg(long, env = "VERIFY_KEY_INIT", hide_env_values = true)]
@@ -247,7 +251,8 @@ impl Command {
             Command::AddTaskprovPeerAggregator {
                 kubernetes_secret_options,
                 peer_endpoint,
-                role,
+                peer_role,
+                aggregation_mode,
                 verify_key_init,
                 collector_hpke_config_file,
                 report_expiry_age_secs,
@@ -271,7 +276,8 @@ impl Command {
                     &datastore,
                     command_line_options.dry_run,
                     peer_endpoint,
-                    *role,
+                    *peer_role,
+                    *aggregation_mode,
                     *verify_key_init,
                     collector_hpke_config_file,
                     report_expiry_age,
@@ -397,6 +403,7 @@ async fn add_taskprov_peer_aggregator<C: Clock>(
     dry_run: bool,
     peer_endpoint: &Url,
     role: Role,
+    aggregation_mode: Option<AggregationMode>,
     verify_key_init: VerifyKeyInit,
     collector_hpke_config_file: &Path,
     report_expiry_age: Option<Duration>,
@@ -415,6 +422,7 @@ async fn add_taskprov_peer_aggregator<C: Clock>(
     let peer_aggregator = Arc::new(PeerAggregator::new(
         peer_endpoint.clone(),
         role,
+        aggregation_mode,
         verify_key_init,
         collector_hpke_config,
         report_expiry_age,
@@ -755,7 +763,7 @@ mod tests {
     use clap::CommandFactory;
     use janus_aggregator_core::{
         datastore::{models::HpkeKeyState, test_util::ephemeral_datastore, Datastore},
-        task::{test_util::TaskBuilder, AggregatorTask, BatchMode},
+        task::{test_util::TaskBuilder, AggregationMode, AggregatorTask, BatchMode},
         taskprov::{PeerAggregator, VerifyKeyInit},
     };
     use janus_core::{
@@ -1041,7 +1049,8 @@ mod tests {
         ds: &Datastore<RealClock>,
         dry_run: bool,
         peer_endpoint: &Url,
-        role: Role,
+        peer_role: Role,
+        aggregation_mode: Option<AggregationMode>,
         verify_key_init: VerifyKeyInit,
         collector_hpke_config: &HpkeConfig,
         report_expiry_age: Option<Duration>,
@@ -1059,7 +1068,8 @@ mod tests {
             ds,
             dry_run,
             peer_endpoint,
-            role,
+            peer_role,
+            aggregation_mode,
             verify_key_init,
             &collector_hpke_config_file,
             report_expiry_age,
@@ -1077,7 +1087,8 @@ mod tests {
         let ds = ephemeral_datastore.datastore(RealClock::default()).await;
 
         let peer_endpoint = "https://example.com".try_into().unwrap();
-        let role = Role::Leader;
+        let peer_role = Role::Leader;
+        let aggregation_mode = Some(AggregationMode::Synchronous);
         let verify_key_init = random();
         let collector_hpke_config = HpkeKeypair::generate(
             HpkeConfigId::from(96),
@@ -1097,7 +1108,8 @@ mod tests {
             &ds,
             /* dry_run */ false,
             &peer_endpoint,
-            role,
+            peer_role,
+            aggregation_mode,
             verify_key_init,
             &collector_hpke_config,
             report_expiry_age,
@@ -1109,7 +1121,8 @@ mod tests {
 
         let want_peer_aggregator = PeerAggregator::new(
             peer_endpoint.clone(),
-            role,
+            peer_role,
+            aggregation_mode,
             verify_key_init,
             collector_hpke_config,
             report_expiry_age,
@@ -1124,7 +1137,7 @@ mod tests {
 
                 Box::pin(async move {
                     Ok(tx
-                        .get_taskprov_peer_aggregator(&peer_endpoint, &role)
+                        .get_taskprov_peer_aggregator(&peer_endpoint, &peer_role)
                         .await
                         .unwrap()
                         .unwrap())
@@ -1146,6 +1159,7 @@ mod tests {
             /* dry_run */ true,
             &"https://example.com".try_into().unwrap(),
             Role::Leader,
+            Some(AggregationMode::Synchronous),
             random(),
             &HpkeKeypair::generate(
                 HpkeConfigId::from(96),
@@ -1197,12 +1211,17 @@ mod tests {
         let ds = ephemeral_datastore.datastore(RealClock::default()).await;
 
         let tasks = Vec::from([
-            TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-                .build()
-                .leader_view()
-                .unwrap(),
             TaskBuilder::new(
                 BatchMode::TimeInterval,
+                AggregationMode::Synchronous,
+                VdafInstance::Prio3Count,
+            )
+            .build()
+            .leader_view()
+            .unwrap(),
+            TaskBuilder::new(
+                BatchMode::TimeInterval,
+                AggregationMode::Synchronous,
                 VdafInstance::Prio3Sum {
                     max_measurement: 4096,
                 },
@@ -1231,13 +1250,14 @@ mod tests {
         let ephemeral_datastore = ephemeral_datastore().await;
         let ds = ephemeral_datastore.datastore(RealClock::default()).await;
 
-        let tasks =
-            Vec::from([
-                TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-                    .build()
-                    .leader_view()
-                    .unwrap(),
-            ]);
+        let tasks = Vec::from([TaskBuilder::new(
+            BatchMode::TimeInterval,
+            AggregationMode::Synchronous,
+            VdafInstance::Prio3Count,
+        )
+        .build()
+        .leader_view()
+        .unwrap()]);
 
         let written_tasks = run_provision_tasks_testcase(&ds, &tasks, true).await;
 
@@ -1255,12 +1275,17 @@ mod tests {
     #[tokio::test]
     async fn replace_task() {
         let tasks = Vec::from([
-            TaskBuilder::new(BatchMode::TimeInterval, VdafInstance::Prio3Count)
-                .build()
-                .leader_view()
-                .unwrap(),
             TaskBuilder::new(
                 BatchMode::TimeInterval,
+                AggregationMode::Synchronous,
+                VdafInstance::Prio3Count,
+            )
+            .build()
+            .leader_view()
+            .unwrap(),
+            TaskBuilder::new(
+                BatchMode::TimeInterval,
+                AggregationMode::Synchronous,
                 VdafInstance::Prio3Sum {
                     max_measurement: 4096,
                 },
@@ -1287,6 +1312,7 @@ mod tests {
             BatchMode::LeaderSelected {
                 batch_time_window_size: None,
             },
+            AggregationMode::Synchronous,
             VdafInstance::Prio3SumVec {
                 bits: 1,
                 length: 4,
@@ -1359,6 +1385,7 @@ mod tests {
   hpke_keys: []
 - peer_aggregator_endpoint: https://leader
   batch_mode: TimeInterval
+  aggregation_mode: Asynchronous
   vdaf: !Prio3Sum
     max_measurement: 4096
   role: Helper
